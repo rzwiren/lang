@@ -249,38 +249,3 @@ D main(void){
   }
   return 0;
 }
-
-/**
- * Can I come up with a better type 0? 
- *  
- * current setup for shape 3 is
- * ( 5 1 2 2 1  2  2 3 2 2 7 ; n
- *   1 0 1 3 16 17 3 5 5 7 9 ; offset from base to first child
- *   0 1 2 3 4 5 6 7 8  9 10 11 12 13 14 15 16 17 18) data
- * 
- *  algorithms involving shape 3 are tedious to write... can you use simpler apis for basic pointers to implement the metadata manipulations for shape 3?                                                   
- *  
- *  versus
- *  p0->[a1,p2,p3,a2,p9]
- *  p3->[p4,p5]
- *  p5->[p6,p7,p8]
- *  
- *  which is 10 pointers x 8 bytes/pointer = 80 bytes
- * 
- *  Memory allocation factors for consideration: 
- *   A range of low bits in a pointer can be guaranteed to be 0 by changing the smallest allocation size. 
- *   byte aligned is multiple of 8   000
- *   w    aligned                16  0000
- *   d                           32  00000
- *   q                           64  000000
- *   o                           128 0000000
- *   h                           256 00000000
- *   i                           512 000000000
- * 
- *   and so on.
- *   Address space is plentiful. even with 512 byte alignment we have room for 2^39~=549 billion allocations.
- *   That's far more than any practical workload would need. 
- *    That makes me want to do saves to disk with nearly raw memory dumps. Run length encoding would compress awesomely. 
- *    a smaller alignment would allow for mapping in place without blowing out disk too much though... 
- * 
- */

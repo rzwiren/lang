@@ -93,9 +93,3 @@ I can encode in a single bit whether an argument can be reused without reallocat
 I can encode the verb in some other bits. this might be useful in order to save space during dispatch
 I can also carry a refcount around. 16 bit refcounts will definitely overflow though. 
 
-
-NOTE: I can compile fine on windows but for some reason compiling on linux via wsl throws
-`l_lin: malloc.c:2379: sysmalloc: Assertion `(old_top == initial_top (av) && old_size == 0) || ((unsigned long) (old_size) >= MINSIZE && prev_inuse (old_top) && ((unsigned long) old_end & (pagesize - 1)) == 0)' failed.
-Aborted`
-at runtime
-

@@ -23,6 +23,7 @@ Q wh(B t,B z,B s,Q q){return (((Q)((t<<4)|((3&z)<<2)|(3&s)))<<48)|q;}         //
 Q ar(Q r){return wh(1,3,1,r);}                                                // create an atom of type 1 (reference) whose element size is 8 bytes
 Q av(Q v){return wh(2,0,1,v);}                                                // create an atom of type 2 (verb)      whose element size is 1 byte
 Q an(Q n){return wh(3,3,1,n);}                                                // create an atom of type 3 (integer)   whose element size is 8 bytes
+Q ap(Q v){return wh(4,3,1,v);}                                                // create an atom of type 4 (partial eval) whose element size is 8 bytes
 
 B  h(Q q){return q>>48;}                                                      // header   from pointer
 B th(Q q){return h(q)>>4;}                                                    // type     from header
@@ -31,7 +32,8 @@ B ia(Q q){return 1==sh(q);}                                                   //
 B ls(Q q){return 3&(h(q)>>2);}                                                // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
 B sz(Q q){return 1<<ls(q);}                                                   // bytesz   from logeltsz
 
-Q tn(B t,B z,D n){AH h={n};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;return wh(t,z,2*!!t,(Q)(o+1));} 
+Q tsn(B t,B s,B z,D n){AH h={n};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;return wh(t,z,s,(Q)(o+1));}  // LATER: custom allocator. 
+Q tn(B t,B z,D n){return tsn(t,2*!!t,z,n);}
 Q zn(B t,B z,D m,D n){                                                        // contiguous allocation of data with same type and width, m metdata elements. n total data elements
   Z*o=malloc(sizeof(Z)+(2*sizeof(D)*m)+((1<<z)*n));                           // there are two metadata vectors of length m. all metadata is dword
   Z h={t,m,n};*o=h;
@@ -81,6 +83,7 @@ void pr(Q q){
     if(2==sh(q)){
       for(D i=0;i<n(q);i++){printf("%lld ",pi(q,i));}}
     }
+  if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   printf("\n");
 }
 DV VD[8][4][4];
@@ -146,6 +149,13 @@ Q plZZ(Q a,Q w){ // not atomic in the usual sense of a k implementation.
 
 Q as(Q a,Q w){O[d(a)]=w;return w;}
 
+// LATER: finish caPA caPV caPZ
+Q caPA(Q a,Q w){Q z=tn(t(a)==t(w)?t(a):0,3,1+n(a));for(D i=0;i<n(a);i++){pid(z,i,pi(a,i));}pid(z,n(a),d(a));return z;}
+Q caPV(Q a,Q w){Q z=tn(t(a)==t(w)?t(a):0,3,n(a)+n(w));D j=0;for(D i=0;i<n(a);i++,j++){pid(z,j,pi(a,i));};for(D i=0;i<n(w);i++,j++){pid(z,j,pi(w,i));}return z;}
+Q caPZ(Q a,Q w){Q z=tn(t(a)==t(w)?t(a):0,3,n(a)+1);
+  for(D i=0;i<n(a);i++){pid(z,i,pi(a,i));};pid(z,n(a),w);
+  return z;
+}
 Q caAA(Q a,Q w){Q z=tn(t(w),ls(w),2);pid(z,0,d(a));pid(z,1,d(w));return z;}
 Q caAV(Q a,Q w){Q z=tn(t(w),ls(w),1+n(w));pid(z,0,d(a));for(D i=0;i<n(w);i++){pid(z,i+1,pi(w,i));}return z;}
 Q caAZ(Q a,Q w){Q z=zn(t(w),ls(w),1+mz(w),1+n(w));
@@ -206,7 +216,7 @@ DV VD[8][4][4]={
   {{0,0,0,0},{0,0,0,0},{0,0,0,0},{0,0,0,0}},
   {{plPP,plPA,plPV,0},{plAP,plAA,plAV,plAZ},{plVP,plVA,plVV,plVZ},{0,plZA,plZV,plZZ}}, //pl,
   {{0,0,0,0},{as,as,as,as},{0,0,0,0},{0,0,0,0}}, // as
-  {{0,0,0,0},{0,caAA,caAV,caAZ},{0,caVA,caVV,caVZ},{0,caZA,caZV,caZZ}}}; // ca
+  {{caVV,caVA,caVV,caVZ},{0,caAA,caAV,caAZ},{caVV,caVA,caVV,caVZ},{0,caZA,caZV,caZZ}}}; // ca
 MV VM[8][4]={
   {0,0,0,0},
   {noP,noA,noV,noZ},
@@ -218,18 +228,35 @@ MV VM[8][4]={
   {en,enA,en,en}};
 C* VT=" ~!@#+:,";
 
+Q Ap(Q a){Q p=tsn(4,0,3,1);pid(p,0,a);return p;}
 Q e(Q* q);
-Q emv(Q*q){Q w=e(q+1);return VM[v(*q)][sh(w)](w);}
-Q edv(Q a,Q*q){a=((1==t(a))&&(6!=v(*q)))?O[d(a)]:a;Q w=e(q+1);DV dv=VD[v(*q)][sh(a)][sh(w)];return dv(a,w);}
+Q emv(Q*q){
+  Q w=e(q+1);
+  if(4==t(w)){Q p=tsn(4,0,3,1);pid(p,0,*q);return caVV(p,w);}
+  return VM[v(*q)][sh(w)](w);
+}
+Q edv(Q a,Q*q){
+  Q w=e(q+1);
+  if(4==t(w)&&(6!=v(*q))){Q p=tsn(4,0,3,2);pid(p,0,a);pid(p,1,*q);return caVV(p,w);}  // handle partial evaluations but allow assignment of them instantly. 
+  a=((1==t(a))&&(6!=v(*q)))?O[d(a)]:a;
+  DV dv=VD[v(*q)][sh(a)][sh(w)];
+  return dv(a,w);
+}
 Q e(Q* q){
-  Q a=*q;Q w=q[1];
-  return (2==t(a)&&w) ?
-         emv(q)       :
-         (w&&2==t(w)) ?
-         edv(a,q+1)   :
-         (1==t(a))    ?
-         O[d(a)]      :
-         a            ;
+  Q a=*q;
+  if(!a){return tsn(4,0,3,0);}                                 // If a is the end of the stream then we must have missing data. return type 4
+  Q w=q[1];                                                    // we know a is non zero, so we can read q[1] but it may be end of stream, need to check if it is 0
+  return (2==t(a)&&w)  ?                                       // if a is a verb and w isn't the end of the stream
+         emv(q)        :                                       //  then evaluate a monadic verb
+         (2==t(a)&&!w) ?                                       // if a is a verb and we have hit the end of the stream
+         Ap(a)         :                                       //  then create a dyadic partial evaluation
+         (w&&2==t(w))  ?                                       // if w is non-zero and is a verb
+         edv(a,q+1)    :                                       //  then eval dyadic verb
+         (4==t(a)&&!w) ?                                       // if a is a partial evaluation and we don't have a w 
+         a             :                                       //  then just return the partial up the stack. 
+         (1==t(a))     ?                                       // if a is a reference
+         O[d(a)]       :                                       //  then return the value of the reference
+         a             ;                                       //  otherwise this must be data, return the data.
 }
 
 Q R(C a){return ('a'<=a&&a<='z')?ar(a-'a'):0;} 

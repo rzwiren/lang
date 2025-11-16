@@ -5,39 +5,38 @@
 #include <string.h>
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
-typedef struct {Q n;} AH;                                                     // header for shape 0 and 2. n is Q for alignment.
-typedef struct {B t;D m;D n;} Z;                                              // header for shape 3 which is contiguous type 0+metadata.t type; m metadata len;n data len
+typedef struct {B t;B s;B z;D r;D n;Q pad;} AH;                               // header for all heap allocated objects. type,shape,eltsize,refcount,length. MUST be at least 8 byte aligned or the allocator and pointer tagging scheme don't work
+typedef struct {AH h;B t;D m;D n;Q pad;} Z;                                   // header for shape 3 which is contiguous type 0+metadata.t type; m metadata len;n data len. MUST be at least 8 byte aligned or the allocator and pointer tagging scheme don't work.
 typedef Q(*DV)(Q,Q);                                                          // function pointer for dyadic verb
 typedef Q(*MV)(Q);                                                            // function pointer for monadic verb
 
-Q d(Q q){return q&0x0000ffffffffffffULL;}                                     // hi bits of pointer hold a header. 4 bit type 2 bit element size 2 bit shape. FUTURE: page size min allocation and page alignment (12 low bits free with 4kb pages, eliminate need for shift to get header)
-B*p(Q q){return (B*)d(q);}                                                    // util to mask out header and rebuild absolute pointer
+AH* ah(Q q){return (AH*)q;}                                                   // all pointer allocations have AH behind the pointer. legal regardless of underlying shape
+Z*  zh(Q q){return (Z*)q;}                                                    // if it is known that we are dealing with shape 3 Z struct then we can get that in its entirety.
+
+B ip(Q q){return !(7&q);}                                                     // Is this Q a pointer? nonzero in low 3 bits means atom
+Q d(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers, needs to be en
+B*p(Q q){return (B*)(ah(q)+1);}                                               // pointers need no manipulation, low bits==0 is the signal for a pointer.
 B r(Q r){return d(r)+'a';}                                                    // transform an atom of type 1 into ascii. This is how we do variables for now. 
 B v(Q v){return d(v);}                                                        // transform an atom of type 2 into its verb index.
 
-AH* ah(Q q){return (AH*)d(q);}                                                // mask header bits and cast to vector type
-Z*  zh(Q q){return (Z*)d(q);}                                                 // mask header bits and cast to bulk vector type
+Q ar(Q r){return (r<<3)|1;}                                                   // create an atom of type 1 (reference)
+Q av(Q v){return (v<<3)|2;}                                                   // create an atom of type 2 (verb)      
+Q an(Q n){return (n<(1ULL<<61))?((n<<3)|3):3;}                                // create an atom of type 3 (integer) TODO: heap allocated 64 bit int. return 3 as a tagged 0 for stuff that should really be allocated on heap. 
+Q ap(Q v){return (v<<3)|4;}                                                   // create an atom of type 4 (partial eval)
 
-Q wh(B t,B z,B s,Q q){return (((Q)((t<<4)|((3&z)<<2)|(3&s)))<<48)|q;}         // write a header into an absolute pointer q
-
-Q ar(Q r){return wh(1,3,1,r);}                                                // create an atom of type 1 (reference) whose element size is 8 bytes
-Q av(Q v){return wh(2,0,1,v);}                                                // create an atom of type 2 (verb)      whose element size is 1 byte
-Q an(Q n){return wh(3,3,1,n);}                                                // create an atom of type 3 (integer)   whose element size is 8 bytes
-Q ap(Q v){return wh(4,3,1,v);}                                                // create an atom of type 4 (partial eval) whose element size is 8 bytes
-
-B  h(Q q){return q>>48;}                                                      // header   from pointer
-B th(Q q){return h(q)>>4;}                                                    // type     from header
-B sh(Q q){return 3&h(q);}                                                     // shape    from header
-B ia(Q q){return 1==sh(q);}                                                   // is atom  from shape
-B ls(Q q){return 3&(h(q)>>2);}                                                // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
+B ia(Q q){return !ip(q);}                                                     // is atom  from pointer
+B th(Q q){return ia(q)?(7&q):ah(q)->t;}                                         // type     from header
+B sh(Q q){return ia(q)?1:ah(q)->s;}                                           // shape    from header
+B ls(Q q){return ia(q)?3:ah(q)->z;}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
 B sz(Q q){return 1<<ls(q);}                                                   // bytesz   from logeltsz
 
-Q tsn(B t,B s,B z,D n){AH h={n};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;return wh(t,z,s,(Q)(o+1));}  // LATER: custom allocator. 
+Q tsn(B t,B s,B z,D n){AH h={t,s,z,0,n};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;return (Q)o;}  // LATER: custom allocator. Q points at data not header 
 Q tn(B t,B z,D n){return tsn(t,2*!!t,z,n);}
 Q zn(B t,B z,D m,D n){                                                        // contiguous allocation of data with same type and width, m metdata elements. n total data elements
   Z*o=malloc(sizeof(Z)+(2*sizeof(D)*m)+((1<<z)*n));                           // there are two metadata vectors of length m. all metadata is dword
-  Z h={t,m,n};*o=h;
-  return wh(0,z,3,(Q)o);
+  AH hh={t,3,z,0,n};
+  Z h={hh,t,m,n};*o=h;
+  return (Q)o;
 }
 D  mz(Q a){return zh(a)->m;}                                                  // length of each Nz and Oz metadata array
 D  nz(Q a){return zh(a)->n;}                                                  // length of data pointed to by Dz
@@ -62,10 +61,10 @@ Q Gi(Q q,B z,B s,D i){return 1==s?d(q):(2==s||0==s)?Bi(p(q),z,i):Bi(Dz(q),z,i);}
 void Bid(B* b,B z,D i,Q d){memcpy(b+z*i,&d,z);}
 void pid(Q q,D i,Q d){Bid(p(q),sz(q),i,d);}
 void Dzid(Q q,D i,Q d){Bid(Dz(q),sz(q),i,d);}
-void Si(Q q,B z,B s,D i,Q d){1==s?((h(q)<<48)|d):(2==s||0==s)?Bid(p(q),z,i,d):Bid(Dz(q),z,i,d);}   // universal setter
+// void Si(Q q,B z,B s,D i,Q d){1==s?((h(q)<<48)|d):(2==s||0==s)?Bid(p(q),z,i,d):Bid(Dz(q),z,i,d);}   // universal setter
 
-D n(Q a){B s=sh(a);return 1==s?1:(0==s||2==s)?ah(a)[-1].n:3==sh(a)?nz(a):0;} 
-B t(Q a){B t;return th(a);}
+D n(Q a){B s=sh(a);return 1==s?1:(0==s||2==s)?ah(a)->n:3==sh(a)?nz(a):0;} 
+B t(Q a){return th(a);}
 
 Q O[26];
 C* VT;
@@ -78,11 +77,12 @@ void pr(Q q){
   if(1==t(q)){printf("%c ",r(q));pr(O[d(q)]);}
   if(2==t(q)){printf("%c",VT[v(q)]);}
   if(3==t(q)){
-    if(0==sh(q)){printf("?num\n");}
-    if(1==sh(q)){printf("%lld\n",d(q));}
+    if(0==sh(q)){printf("?num");}
+    if(1==sh(q)){printf("%lld",d(q));}
     if(2==sh(q)){
       for(D i=0;i<n(q);i++){printf("%lld ",pi(q,i));}}
     }
+    if(3==sh(q)){for(D i=0;i<n(q);i++){printf("%lld ",Dzi(q,i));}}
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   printf("\n");
 }

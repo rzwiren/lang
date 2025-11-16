@@ -11,6 +11,9 @@ Areas explored:
    text files are two dimensional data structures, but code and the written word is truly one dimensional (why we need parens)
    sentences/statements
    phrases/expressions
+   grammatical robustness to missing arguments. two cases:
+    + (dyad missing both args)
+    1+(dyad missing right arg)
   noun
   verb
   adverb
@@ -49,6 +52,9 @@ How do each of the explored areas overlap?
   Indexing
    how does indexing into data relate to function dispatch?
 
+=======
+
+random notes:
 
 Can I come up with a better type 0? CONSIER A DEDICATED VERB TO CREATE THIS INSTEAD OF WITHIN MANY VERBS
 

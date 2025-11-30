@@ -35,38 +35,17 @@ B sz(Q q){return 1<<ls(q);}                                                   //
 
 Q tsn(B t,B s,B z,D n){AH h={t,s,z,0,n};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;return (Q)o;}  // LATER: custom allocator. Q points at data not header 
 Q tn(B t,B z,D n){return tsn(t,1,z,n);}
-Q zn(B t,B z,D m,D n){                                                        // contiguous allocation of data with same type and width, m metdata elements. n total data elements
-  Z*o=malloc(sizeof(Z)+(2*sizeof(D)*m)+((1<<z)*n));                           // there are two metadata vectors of length m. all metadata is dword
-  AH hh={t,2,z,0,n};
-  Z h={hh,t,m,n};*o=h;
-  return (Q)o;
-}
-D  mz(Q a){return zh(a)->m;}                                                  // length of each Nz and Oz metadata array
-D  nz(Q a){return zh(a)->n;}                                                  // length of data pointed to by Dz
-D* Nz(Q a){return (D*)(1+zh(a));}                                             // pointer to vector of lengths of each child
-D* Oz(Q a){return mz(a)+Nz(a);}                                               // pointer to offset of first child. may point to an offset with Oz(a)+m or beyond into Dz(a). 
-                                                                              //  We use this to figure out if a certain metadata item points to aother lower layer of a list or actual data
-B* Dz(Q a){return (B*)((mz(a)*2)+Nz(a));}                                     // pointer to data for a bulk allocated type 0
-D  fz(Q a,D o){D m=mz(a);D z=o;while(z<m){z=Oz(a)[z];};return z;}             // dist from Oz(a) to first data item 
-D  no(Q a,D o,D n){                                                           // number of children under this offset
-  D nzo=Nz(a)[o];D oo=Oz(a)[o];
-  if(oo>=mz(a)){return Nz(a)[o];}
-  for(D i=0;i<nzo;i++){n+=no(a,o+i,n);}
-  return n;
-}
 
 // varwidth getters
 Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                        // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}
-Q Dzi(Q q,D i){return Bi(Dz(q),sz(q),i);}
-Q Gi(Q q,B z,B s,D i){return 0==s?d(q):(1==s)?Bi(p(q),z,i):2==s?Bi(Dz(q),z,i):0;}   // universal getter, checks shape. Eventually this will need to be able to support heap allocated atoms. right now it assumes all atoms are stuffed into the pointers.
-Q Giv(Q q,D i){B s=sh(q),tq=th(q);return 0==s?q:1==s?et(pi(q,i),tq):2==s?et(Dzi(q,i),tq):0;}  // universal getter, returns tagged instead of raw
+Q Gi(Q q,B z,B s,D i){return 0==s?d(q):(1==s)?Bi(p(q),z,i):0;}   // universal getter, checks shape. Eventually this will need to be able to support heap allocated atoms. right now it assumes all atoms are stuffed into the pointers.
+Q Giv(Q q,D i){B s=sh(q),tq=th(q);return 0==s?q:1==s?et(pi(q,i),tq):0;}  // universal getter, returns tagged instead of raw
 // varwidth setters
 void Bid(B* b,B z,D i,Q d){memcpy(b+z*i,&d,z);}
 void pid(Q q,D i,Q d){Bid(p(q),sz(q),i,d);}
-void Dzid(Q q,D i,Q d){Bid(Dz(q),sz(q),i,d);}
 
-D n(Q a){B s=sh(a);return 0==s?1:1==s?ah(a)->n:2==s?nz(a):0;} 
+D n(Q a){B s=sh(a);return 0==s?1:1==s?ah(a)->n:0;} 
 B t(Q a){return th(a);}
 
 Q O[26];
@@ -76,14 +55,12 @@ void pr(Q q){
   if(0==q){return;}
   if(0==t(q)){
     if(!sh(q)){printf("atom type 0?%lld ",q);}
-    if(2==sh(q)){for(D i=0;i<n(q);i++){pr(Dzi(q,i));}}
     if(1==sh(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}}
   if(1==t(q)){printf("%c ",r(q));pr(O[d(q)]);}
   if(2==t(q)){printf("%c",VT[v(q)]);}
   if(3==t(q)){
     if(0==sh(q)){printf("%lld",d(q));}
     if(1==sh(q)){for(D i=0;i<n(q);i++){printf("%lld ",pi(q,i));}}
-    if(2==sh(q)){for(D i=0;i<n(q);i++){printf("%lld ",Dzi(q,i));}}
   }
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   if(5==t(q)){printf("control: %d\n",c(q));}
@@ -92,8 +69,10 @@ void pr(Q q){
 DV VD[9];
 MV VM[9];
 
+Q id(Q a){return a;}
+Q en(Q a){Q z=tn(ia(a)?t(a):0,ls(a),1);pid(z,0,ia(a)?d(a):a);return z;}
 Q tp(Q a){return an(t(a));}
-Q ct(Q a){return an(2==sh(a)?*Nz(a):n(a));}
+Q ct(Q a){return an(n(a));}
 
 Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(ct(w));// dyadic verb broadcast
   Q z;
@@ -108,8 +87,6 @@ Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(c
   }
   if(!ta){
     if(1==sa){z=tn(0,3,cta);
-      if(2==sw){return ac(3);}
-      // otherwise shape 0 or 1, can use GI for both. 
       if(1==sw && cta!=ctw){return ac(2);} // length
       for(D i=0;i<cta;i++){Q ai=Giv(a,i);Q wi=Giv(w,i);Q zi=dv(ai,wi);
         if(5==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
@@ -117,12 +94,9 @@ Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(c
       }
       return z;
     }
-    if(2==sa){return ac(3);}
   }
   if(!tw){
     if(1==sw){z=tn(0,3,ctw);
-      if(2==sa){return ac(3);}
-      // otherwise shape 0 or 1, can use GI for both. 
       if(1==sa && cta!=ctw){return ac(2);} // length
       for(D i=0;i<ctw;i++){Q ai=Giv(a,i);Q wi=Giv(w,i);Q zi=dv(ai,wi);
         if(5==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
@@ -130,7 +104,6 @@ Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(c
       }
       return z;
     }
-    if(2==sw){return ac(3);}
   }
   if(cta!=ctw && !(1==cta || 1==ctw)){return ac(2);}
   return ac(0); // if we get here then a and w are not type 0 and length is conforming so work can be done on them
@@ -138,10 +111,10 @@ Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(c
 Q mvb(Q w,MV mv){ // monadic verb broadcast. will return data if it broadcasts. if not it returns a sentinel to communicate upwards either a length error or for the verb to do the work. 
   Q z;B tw=t(w),sw=sh(w);D nw=n(w);
   if(0==tw){
-    z=1==sw?tn(0,3,nw):zn(0,3,mz(w),nw);
+    z=tn(0,3,nw);
     for(D i=0;i<nw;i++){Q wi=Giv(w,i);Q zi=mv(wi);
       if(5==t(zi)){return zi;}
-      if(1==sw){pid(z,i,zi);} else {Dzid(z,i,zi);}
+      pid(z,i,zi);
     }
     return z;
   }
@@ -150,12 +123,6 @@ Q mvb(Q w,MV mv){ // monadic verb broadcast. will return data if it broadcasts. 
 Q car(Q w){
   B s=sh(w);
   if(0==s){return w;}
-  if(2==s){
-    D n=*Nz(w);  //get the length of the first thing in the z list
-    Q z=tn(t(w),ls(w),n);
-    for(D i=0;i<n;i++){pid(z,i,Dzi(w,i));} // later: memcpy the range. 
-    return z;
-  }
   Q d=pi(w,0);
   if(0==t(w)){return d;}
   return et(d,t(w));
@@ -166,35 +133,25 @@ Q nt(Q w){
   if(5!=t(z)){return z;}if(c(z)){return z;} // if data is returned, return the data. if a control sentinel is returned and its payload is nonzero then return, otherwise listen to theh control signal to do the proper work.
   if(ia(w)){return an(!d(w));}
   if(1==sh(w)){z=tn(3,ls(w),n(w));for(D i=0;i<n(w);i++){pid(z,i,!pi(w,i));};return z;}
-  if(2==sh(w)){z=zn(3,ls(w),mz(w),n(w));for(D i=0;i<2*mz(w);i++){Nz(z)[i]=Nz(w)[i];}for(D i=0;i<n(w);i++){Dzid(z,i,!Dzi(w,i));};return z;}
   return ac(1); // return shape error
 }
 
 Q tl(Q w){
-  if(ia(w)){Q z=tn(3,ls(w),d(w));for(D i=0;i<d(w);i++){pid(z,i,i);}return z;}
-  if(1==sh(w)){
-    D nw=n(w);D mzz=1+nw;D zz=0;for(D i=0;i<nw;i++){zz+=pi(w,i);};Q z=zn(3,ls(w),mzz,zz);
-    Nz(z)[0]=nw;Oz(z)[0]=1;D l=0;
-    for(D i=0;i<nw;i++){Oz(z)[i+1]=((D*)(Dz(z)+l))-Oz(z);l+=Nz(z)[i+1]=pi(w,i);}
-    D k=0;for(D i=0;i<nw;i++){for(D j=0;j<pi(w,i);j++){Dzid(z,k++,j);}};
-    return z;
+  B aw=ia(w);
+  if(aw){w=en(w);}
+  D nw=n(w);Q z=tn(0,3,nw);
+  for(D i=0;i<nw;i++){
+    Q zi=tn(3,ls(w),d(w));for(D j=0;j<d(w);j++){pid(zi,j,j);}
+    pid(z,i,zi);
   }
-  if(2==sh(w)){return ac(3);} // nyi
-  return ac(1); // shape err
+  return aw?car(z):z;
 }
 
 Q at(Q a,Q w){
-  B aa=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);Q z=2==shz?zn(tz,sz(a),mz(w),nz):tn(t(a),ls(a),nz);
+  B aa=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);Q z=tn(t(a),ls(a),nz);
   for(D i=0;i<nz;i++){
-    Q wi=Gi(w,sz(w),shz,i);Q zi;
-    if(2==sh(a)){
-      D nz=Nz(a)[d(w)];D oz=Oz(a)[wi];
-      zi=tn(t(a),ls(a),nz);for(D i=0;i<nz;i++){pid(z,i,Bi(Dz(a)+oz,sz(a),i));} // later: memcpy the whole range instead.
-      printf("sh(zi) %d t(zi) %d\n",sh(zi),t(zi));pr(zi);
-    } else {
-      zi=Gi(a,sz(a),sh(a),wi);
-    }
-    if(2==shz){Dzid(z,i,zi);} else {pid(z,i,zi);}
+    Q wi=Gi(w,sz(w),shz,i);Q zi=Gi(a,sz(a),sh(a),wi);
+    pid(z,i,zi);
   }
   return aa?car(z):z;
 }
@@ -202,10 +159,10 @@ Q at(Q a,Q w){
 Q math(Q a,Q w,DV op){ // anything that gets here has been broadcasted. we can use the universal getter on both a and w
   D na=n(a),nw=n(w);D nz=na<nw?nw:na;B shz=sh(a)<sh(w)?sh(w):sh(a);B lz=ls(a)<ls(w)?ls(w):ls(a);
   if(0==shz){return an(op(d(a),d(w)));}
-  Q z=1==shz?tn(t(a),lz,nz):zn(t(a),lz,mz(a),nz); // later: set the metadata for shape 2, it is unset.
+  Q z=tn(t(a),lz,nz);
   for(D i=0;i<nz;i++){Q ai=Gi(a,sz(a),sh(a),i);Q wi=Gi(w,sz(w),sh(w),i);
     Q zi=op(ai,wi);
-    if(1==shz){pid(z,i,zi);} else {Dzid(z,i,zi);}
+    pid(z,i,zi);
   }
   return z;
 }
@@ -217,15 +174,12 @@ Q ml(Q a,Q w){Q z=dvb(a,w,ml);if(5!=t(z)){return z;}if(c(z)){return z;}; return 
 Q as(Q a,Q w){O[d(a)]=w;return w;}
 
 Q ca(Q a,Q w){
-  B tz=((t(a)==t(w))&&2!=sh(a)&&2!=sh(w))?t(a):0;
+  B tz=(t(a)==t(w))?t(a):0;
   D j=0;D ca=d(ct(a));D cw=d(ct(w));Q z=tn(tz,3,ca+cw);
   for(D i=0;i<ca;i++,j++){Q ai=at(a,an(i));pid(z,j,tz?d(ai):ai);} // decode if not type 0
   for(D i=0;i<cw;i++,j++){Q wi=at(w,an(i));pid(z,j,tz?d(wi):wi);} // decode if atom or somethig
   return z;
 }
-
-Q id(Q a){return a;}
-Q en(Q a){Q z=tn(ia(a)?t(a):0,ls(a),1);pid(z,0,ia(a)?d(a):a);return z;}
 
 DV VD[9]={0,0,0,at,0,pl,ml,as,ca};
 MV VM[9]={0,nt,tl,tp,ct,0,car,id,en};

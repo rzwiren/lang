@@ -6,12 +6,10 @@
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
 typedef struct {B t;B s;B z;D r;D n;Q pad;} AH;                               // header for all heap allocated objects. type,shape,eltsize,refcount,length. MUST be at least 8 byte aligned or the allocator and pointer tagging scheme don't work
-typedef struct {AH h;B t;D m;D n;Q pad;} Z;                                   // header for shape 3 which is contiguous type 0+metadata.t type; m metadata len;n data len. MUST be at least 8 byte aligned or the allocator and pointer tagging scheme don't work.
 typedef Q(*DV)(Q,Q);                                                          // function pointer for dyadic verb
 typedef Q(*MV)(Q);                                                            // function pointer for monadic verb
 
 AH* ah(Q q){return (AH*)q;}                                                   // all pointer allocations have AH behind the pointer. legal regardless of underlying shape
-Z*  zh(Q q){return (Z*)q;}                                                    // if it is known that we are dealing with shape 3 Z struct then we can get that in its entirety.
 
 B ip(Q q){return !(7&q);}                                                     // Is this Q a pointer? nonzero in low 3 bits means atom
 Q d(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
@@ -39,8 +37,8 @@ Q tn(B t,B z,D n){return tsn(t,1,z,n);}
 // varwidth getters
 Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                        // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}
-Q Gi(Q q,B z,B s,D i){return 0==s?d(q):(1==s)?Bi(p(q),z,i):0;}   // universal getter, checks shape. Eventually this will need to be able to support heap allocated atoms. right now it assumes all atoms are stuffed into the pointers.
-Q Giv(Q q,D i){B s=sh(q),tq=th(q);return 0==s?q:1==s?et(pi(q,i),tq):0;}  // universal getter, returns tagged instead of raw
+Q Gi(Q q,D i){B s=sh(q);return 0==s?d(q):(1==s)?pi(q,i):0;}                   // get at index, return raw data. later: add support for heap allocated atoms
+Q Giv(Q q,D i){B s=sh(q),tq=th(q);return 0==s?q:1==s?et(pi(q,i),tq):0;}       // get at index, return tagged Q
 // varwidth setters
 void Bid(B* b,B z,D i,Q d){memcpy(b+z*i,&d,z);}
 void pid(Q q,D i,Q d){Bid(p(q),sz(q),i,d);}
@@ -87,6 +85,30 @@ Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(c
   }
   return ac(0); // if we get here then a and w are not type 0 and length is conforming so work can be done on them
 }
+Q ravb(Q a,Q w,DV dv){ // right atomic broadcast.
+  Q z;B tw=t(w),sw=sh(w);D nw=n(w);
+  if(0==tw){
+    z=tn(0,3,nw);
+    for(D i=0;i<nw;i++){Q wi=Giv(w,i);Q zi=dv(a,wi);
+      if(5==t(zi)){return zi;}
+      pid(z,i,zi);
+    }
+    return z;
+  }
+  return ac(0); // this is a signal to the verb that work should be done on the w parameter.
+}
+Q lavb(Q a,Q w,DV dv){ // left atomic broadcast.
+  Q z;B ta=t(a),sa=sh(a);D na=n(a);
+  if(0==ta){
+    z=tn(0,3,na);
+    for(D i=0;i<na;i++){Q ai=Giv(a,i);Q zi=dv(ai,w);
+      if(5==t(zi)){return zi;}
+      pid(z,i,zi);
+    }
+    return z;
+  }
+  return ac(0); // this is a signal to the verb that work should be done on the w parameter.
+}
 Q mvb(Q w,MV mv){ // monadic verb broadcast. will return data if it broadcasts. if not it returns a sentinel to communicate upwards either a length error or for the verb to do the work. 
   Q z;B tw=t(w),sw=sh(w);D nw=n(w);
   if(0==tw){
@@ -127,9 +149,11 @@ Q tl(Q w){
 }
 
 Q at(Q a,Q w){
-  B aa=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);Q z=tn(t(a),ls(a),nz);
+  Q z=ravb(a,w,at);
+  if(5!=t(z)){return z;}if(c(z)){return z;}
+  B aa=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);z=tn(t(a),ls(a),nz);
   for(D i=0;i<nz;i++){
-    Q wi=Gi(w,sz(w),shz,i);Q zi=Gi(a,sz(a),sh(a),wi);
+    Q wi=Gi(w,i);Q zi=Gi(a,wi);
     pid(z,i,zi);
   }
   return aa?car(z):z;
@@ -139,7 +163,7 @@ Q math(Q a,Q w,DV op){ // anything that gets here has been broadcasted. we can u
   D na=n(a),nw=n(w);D nz=na<nw?nw:na;B shz=sh(a)<sh(w)?sh(w):sh(a);B lz=ls(a)<ls(w)?ls(w):ls(a);
   if(0==shz){return an(op(d(a),d(w)));}
   Q z=tn(t(a),lz,nz);
-  for(D i=0;i<nz;i++){Q ai=Gi(a,sz(a),sh(a),i);Q wi=Gi(w,sz(w),sh(w),i);
+  for(D i=0;i<nz;i++){Q ai=Gi(a,i);Q wi=Gi(w,i);
     Q zi=op(ai,wi);
     pid(z,i,zi);
   }

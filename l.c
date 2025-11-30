@@ -60,7 +60,7 @@ void pr(Q q){
   if(2==t(q)){printf("%c",VT[v(q)]);}
   if(3==t(q)){
     if(0==sh(q)){printf("%lld",d(q));}
-    if(1==sh(q)){for(D i=0;i<n(q);i++){printf("%lld ",pi(q,i));}}
+    if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld ",pi(q,i));}} else {printf("!0 ");}}
   }
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   if(5==t(q)){printf("control: %d\n",c(q));}
@@ -75,37 +75,16 @@ Q tp(Q a){return an(t(a));}
 Q ct(Q a){return an(n(a));}
 
 Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(ct(w));// dyadic verb broadcast
-  Q z;
-  if(!ta&&!tw){
-    if(cta!=ctw){return ac(2);} z=tn(0,3,cta);
-    for(D i=0;i<cta;i++){
+  if(cta!=ctw && sa && sw){return ac(2);} // if counts are unequal and we don't have an atom a or w then length error
+  if((!ta)||(!tw)){
+    D nz=sa?cta:ctw;Q z=tn(0,3,nz);  
+    for(D i=0;i<nz;i++){
       Q ai=Giv(a,i);Q wi=Giv(w,i);Q zi=dv(ai,wi);
       if(5==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
       pid(z,i,zi);
     }
     return z;
   }
-  if(!ta){
-    if(1==sa){z=tn(0,3,cta);
-      if(1==sw && cta!=ctw){return ac(2);} // length
-      for(D i=0;i<cta;i++){Q ai=Giv(a,i);Q wi=Giv(w,i);Q zi=dv(ai,wi);
-        if(5==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
-        pid(z,i,zi);
-      }
-      return z;
-    }
-  }
-  if(!tw){
-    if(1==sw){z=tn(0,3,ctw);
-      if(1==sa && cta!=ctw){return ac(2);} // length
-      for(D i=0;i<ctw;i++){Q ai=Giv(a,i);Q wi=Giv(w,i);Q zi=dv(ai,wi);
-        if(5==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
-        pid(z,i,zi);
-      }
-      return z;
-    }
-  }
-  if(cta!=ctw && !(1==cta || 1==ctw)){return ac(2);}
   return ac(0); // if we get here then a and w are not type 0 and length is conforming so work can be done on them
 }
 Q mvb(Q w,MV mv){ // monadic verb broadcast. will return data if it broadcasts. if not it returns a sentinel to communicate upwards either a length error or for the verb to do the work. 
@@ -141,7 +120,7 @@ Q tl(Q w){
   if(aw){w=en(w);}
   D nw=n(w);Q z=tn(0,3,nw);
   for(D i=0;i<nw;i++){
-    Q zi=tn(3,ls(w),d(w));for(D j=0;j<d(w);j++){pid(zi,j,j);}
+    Q ni=pi(w,i);Q zi=tn(3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
     pid(z,i,zi);
   }
   return aw?car(z):z;
@@ -193,7 +172,7 @@ Q emv(Q*q){
   return VM[v(*q)](w);
 }
 Q edv(Q a,Q*q){
-  Q w=e(q+1);B i=v(*q); printf("verb idx %d\n",i);
+  Q w=e(q+1);B i=v(*q);
   if(4==t(w)&&(7!=i)){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,*q);return ca(p,w);}  // handle partial evaluations but allow assignment of them instantly. 
   a=((1==t(a))&&(7!=i))?O[d(a)]:a;
   DV dv=VD[i];

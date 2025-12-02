@@ -11,7 +11,7 @@ typedef Q(*MV)(Q);                                                            //
 
 AH* ah(Q q){return (AH*)q;}                                                   // all pointer allocations have AH behind the pointer. legal regardless of underlying shape
 
-B ip(Q q){return !(7&q);}                                                     // Is this Q a pointer? nonzero in low 3 bits means atom
+B ip(Q q){return q&&!(7&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
 Q d(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
 B*p(Q q){return (B*)(ah(q)+1);}                                               // pointers need no manipulation, low bits==0 is the signal for a pointer.
 B r(Q r){return d(r)+'a';}                                                    // transform an atom of type 1 into ascii. This is how we do variables for now. 
@@ -26,25 +26,37 @@ Q ac(Q c){return (c<<3)|5;}                                                   //
 Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):0;}   // encode data of an atom based on the type
 
 B ia(Q q){return !ip(q);}                                                     // is atom  from pointer
-B th(Q q){return ia(q)?(7&q):ah(q)->t;}                                       // type     from header
+B t(Q q){return ia(q)?(7&q):ah(q)->t;}                                        // type     from header
 B sh(Q q){return ia(q)?0:ah(q)->s;}                                           // shape    from header
 B ls(Q q){return ia(q)?3:ah(q)->z;}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
 B sz(Q q){return 1<<ls(q);}                                                   // bytesz   from logeltsz
+D rc(Q q){return !q?0:ia(q)?1:ah(q)->r;}                                      // refcnt   from header
+D n(Q a){B s=sh(a);return 0==s?1:1==s?ah(a)->n:0;}                            // length   from header
 
-Q tsn(B t,B s,B z,D n){AH h={t,s,z,0,n};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;return (Q)o;}  // LATER: custom allocator. Q points at data not header 
+void ir(Q q);void dr(Q q);                                                          // forward declare refcount helpers
+
+Q tsn(B t,B s,B z,D n){AH h={t,s,z,1,n,0};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;memset((void*)(o+1), 0, (1<<z)*n);return (Q)o;}  // LATER: custom allocator. Q points at data not header 
 Q tn(B t,B z,D n){return tsn(t,1,z,n);}
 
 // varwidth getters
 Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                        // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}
-Q Gi(Q q,D i){B s=sh(q);return 0==s?d(q):(1==s)?pi(q,i):0;}                   // get at index, return raw data. later: add support for heap allocated atoms
-Q Giv(Q q,D i){B s=sh(q),tq=th(q);return 0==s?q:1==s?et(pi(q,i),tq):0;}       // get at index, return tagged Q
+Q ri(Q q,D i){B s=sh(q);return 0==s?d(q):(1==s)?pi(q,i):0;}                   // raw data at i. later: add support for heap allocated atoms
+Q qi(Q q,D i){B s=sh(q),tq=t(q);return 0==s?q:1==s?et(pi(q,i),tq):0;}       // get at index, return tagged Q
 // varwidth setters
 void Bid(B* b,B z,D i,Q d){memcpy(b+z*i,&d,z);}
 void pid(Q q,D i,Q d){Bid(p(q),sz(q),i,d);}
+void zid(Q q,D i,Q d){Q o=pi(q,i);ir(d);pid(q,i,d);dr(o);}
+void qid(Q q,D i,Q d){if(!t(q)){zid(q,i,d);}else{pid(q,i,d);}}
 
-D n(Q a){B s=sh(a);return 0==s?1:1==s?ah(a)->n:0;} 
-B t(Q a){return th(a);}
+void ir(Q q){ if(ip(q)){ah(q)->r++;} return;}
+void dr(Q q){ 
+  if(!q || ia(q)){return;}                                                    // if null or atom just return
+  if(0< --(ah(q)->r)){return;}                                                // if there is a nonzero refcount return
+  if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                             // this object has refcount==0. if type 0, recurse on children
+  free((void*)q);                                                             // then free this q
+  return;                                                                     // should I consider returning a control sentinel here (type)
+}
 
 Q O[26];
 C* VT;
@@ -68,7 +80,7 @@ DV VD[9];
 MV VM[9];
 
 Q id(Q a){return a;}
-Q en(Q a){Q z=tn(ia(a)?t(a):0,ls(a),1);pid(z,0,ia(a)?d(a):a);return z;}
+Q en(Q a){B ai=ia(a);Q z=tn(ai?t(a):0,ls(a),1);if(ai){pid(z,0,d(a));}else{zid(z,0,a);};return z;}
 Q tp(Q a){return an(t(a));}
 Q ct(Q a){return an(n(a));}
 
@@ -77,9 +89,9 @@ Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(c
   if((!ta)||(!tw)){
     D nz=sa?cta:ctw;Q z=tn(0,3,nz);  
     for(D i=0;i<nz;i++){
-      Q ai=Giv(a,i);Q wi=Giv(w,i);Q zi=dv(ai,wi);
+      Q ai=qi(a,i);Q wi=qi(w,i);Q zi=dv(ai,wi);
       if(5==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
-      pid(z,i,zi);
+      zid(z,i,zi);
     }
     return z;
   }
@@ -89,9 +101,9 @@ Q ravb(Q a,Q w,DV dv){ // right atomic broadcast.
   Q z;B tw=t(w),sw=sh(w);D nw=n(w);
   if(0==tw){
     z=tn(0,3,nw);
-    for(D i=0;i<nw;i++){Q wi=Giv(w,i);Q zi=dv(a,wi);
+    for(D i=0;i<nw;i++){Q wi=qi(w,i);Q zi=dv(a,wi);
       if(5==t(zi)){return zi;}
-      pid(z,i,zi);
+      zid(z,i,zi);
     }
     return z;
   }
@@ -101,9 +113,9 @@ Q lavb(Q a,Q w,DV dv){ // left atomic broadcast.
   Q z;B ta=t(a),sa=sh(a);D na=n(a);
   if(0==ta){
     z=tn(0,3,na);
-    for(D i=0;i<na;i++){Q ai=Giv(a,i);Q zi=dv(ai,w);
+    for(D i=0;i<na;i++){Q ai=qi(a,i);Q zi=dv(ai,w);
       if(5==t(zi)){return zi;}
-      pid(z,i,zi);
+      zid(z,i,zi);
     }
     return z;
   }
@@ -113,9 +125,9 @@ Q mvb(Q w,MV mv){ // monadic verb broadcast. will return data if it broadcasts. 
   Q z;B tw=t(w),sw=sh(w);D nw=n(w);
   if(0==tw){
     z=tn(0,3,nw);
-    for(D i=0;i<nw;i++){Q wi=Giv(w,i);Q zi=mv(wi);
+    for(D i=0;i<nw;i++){Q wi=qi(w,i);Q zi=mv(wi);
       if(5==t(zi)){return zi;}
-      pid(z,i,zi);
+      zid(z,i,zi);
     }
     return z;
   }
@@ -143,7 +155,7 @@ Q tl(Q w){
   D nw=n(w);Q z=tn(0,3,nw);
   for(D i=0;i<nw;i++){
     Q ni=pi(w,i);Q zi=tn(3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
-    pid(z,i,zi);
+    zid(z,i,zi);
   }
   return aw?car(z):z;
 }
@@ -153,8 +165,8 @@ Q at(Q a,Q w){
   if(5!=t(z)){return z;}if(c(z)){return z;}
   B aa=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);z=tn(t(a),ls(a),nz);
   for(D i=0;i<nz;i++){
-    Q wi=Gi(w,i);Q zi=Gi(a,wi);
-    pid(z,i,zi);
+    Q wi=ri(w,i);Q zi=ri(a,wi);
+    qid(z,i,zi);
   }
   return aa?car(z):z;
 }
@@ -163,7 +175,7 @@ Q math(Q a,Q w,DV op){ // anything that gets here has been broadcasted. we can u
   D na=n(a),nw=n(w);D nz=na<nw?nw:na;B shz=sh(a)<sh(w)?sh(w):sh(a);B lz=ls(a)<ls(w)?ls(w):ls(a);
   if(0==shz){return an(op(d(a),d(w)));}
   Q z=tn(t(a),lz,nz);
-  for(D i=0;i<nz;i++){Q ai=Gi(a,i);Q wi=Gi(w,i);
+  for(D i=0;i<nz;i++){Q ai=ri(a,i);Q wi=ri(w,i);
     Q zi=op(ai,wi);
     pid(z,i,zi);
   }
@@ -174,13 +186,13 @@ Q ml_aa(Q a,Q w){ return a*w;}
 Q pl(Q a,Q w){Q z=dvb(a,w,pl);if(5!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
 Q ml(Q a,Q w){Q z=dvb(a,w,ml);if(5!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
 
-Q as(Q a,Q w){O[d(a)]=w;return w;}
+Q as(Q a,Q w){Q o=O[d(a)];ir(w);O[d(a)]=w;if(o&&ip(o)){dr(o);};return w;}
 
 Q ca(Q a,Q w){
   B tz=(t(a)==t(w))?t(a):0;
   D j=0;D ca=d(ct(a));D cw=d(ct(w));Q z=tn(tz,3,ca+cw);
-  for(D i=0;i<ca;i++,j++){Q ai=at(a,an(i));pid(z,j,tz?d(ai):ai);} // decode if not type 0
-  for(D i=0;i<cw;i++,j++){Q wi=at(w,an(i));pid(z,j,tz?d(wi):wi);} // decode if atom or somethig
+  for(D i=0;i<ca;i++,j++){Q ai=at(a,an(i));qid(z,j,tz?d(ai):ai);} // decode if not type 0
+  for(D i=0;i<cw;i++,j++){Q wi=at(w,an(i));qid(z,j,tz?d(wi):wi);} // decode if atom or somethig
   return z;
 }
 
@@ -236,7 +248,8 @@ D main(void){
     printf(" "); if (!fgets(buffer, 100, stdin)){break;}
     buffer[strcspn(buffer, "\r")] = '\0'; buffer[strcspn(buffer, "\n")] = '\0';
     if (strcmp(buffer, "\\\\") == 0){break;}
-    pr(e(pe(buffer)));
+    Q r=e(pe(buffer));pr(r);
+    dr(r);
   }
   return 0;
 }

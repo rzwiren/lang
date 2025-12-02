@@ -53,7 +53,7 @@ void ir(Q q){ if(ip(q)){ah(q)->r++;} return;}
 void dr(Q q){ 
   if(!q || ia(q)){return;}                                                    // if null or atom just return
   if(0< --(ah(q)->r)){return;}                                                // if there is a nonzero refcount return
-  if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                             // this object has refcount==0. if type 0, recurse on children
+  if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                              // this object has refcount==0. if type 0, recurse on children
   free((void*)q);                                                             // then free this q
   return;                                                                     // should I consider returning a control sentinel here (type)
 }
@@ -84,55 +84,22 @@ Q en(Q a){B ai=ia(a);Q z=tn(ai?t(a):0,ls(a),1);if(ai){pid(z,0,d(a));}else{zid(z,
 Q tp(Q a){return an(t(a));}
 Q ct(Q a){return an(n(a));}
 
-Q dvb(Q a,Q w,DV dv){ B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D cta=d(ct(a)),ctw=d(ct(w));// dyadic verb broadcast
-  if(cta!=ctw && sa && sw){return ac(2);} // if counts are unequal and we don't have an atom a or w then length error
-  if((!ta)||(!tw)){
-    D nz=sa?cta:ctw;Q z=tn(0,3,nz);  
+typedef enum {DB,LB,RB,MB} BM; // broadcast mode
+Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=n(w);
+  if(DB==m && na!=nw && sa && sw){return ac(2);}
+  B ib=DB==m?((!ta)||(!tw)):RB==m?!tw:LB==m?!ta:/*MB==m*/!tw;
+  if(ib){
+    D nz=DB==m?(sa?na:nw):RB==m?nw:LB==m?na:nw;
+    Q z=tn(0,3,nz);
     for(D i=0;i<nz;i++){
-      Q ai=qi(a,i);Q wi=qi(w,i);Q zi=dv(ai,wi);
+      Q zi=DB==m?dv(qi(a,i),qi(w,i)):RB==m?dv(a,qi(w,i)):LB==m?dv(qi(a,i),w):/*MB==m*/mv(qi(w,i));
       if(5==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
       zid(z,i,zi);
     }
-    return z;
   }
-  return ac(0); // if we get here then a and w are not type 0 and length is conforming so work can be done on them
+  return ac(0);
 }
-Q ravb(Q a,Q w,DV dv){ // right atomic broadcast.
-  Q z;B tw=t(w),sw=sh(w);D nw=n(w);
-  if(0==tw){
-    z=tn(0,3,nw);
-    for(D i=0;i<nw;i++){Q wi=qi(w,i);Q zi=dv(a,wi);
-      if(5==t(zi)){return zi;}
-      zid(z,i,zi);
-    }
-    return z;
-  }
-  return ac(0); // this is a signal to the verb that work should be done on the w parameter.
-}
-Q lavb(Q a,Q w,DV dv){ // left atomic broadcast.
-  Q z;B ta=t(a),sa=sh(a);D na=n(a);
-  if(0==ta){
-    z=tn(0,3,na);
-    for(D i=0;i<na;i++){Q ai=qi(a,i);Q zi=dv(ai,w);
-      if(5==t(zi)){return zi;}
-      zid(z,i,zi);
-    }
-    return z;
-  }
-  return ac(0); // this is a signal to the verb that work should be done on the w parameter.
-}
-Q mvb(Q w,MV mv){ // monadic verb broadcast. will return data if it broadcasts. if not it returns a sentinel to communicate upwards either a length error or for the verb to do the work. 
-  Q z;B tw=t(w),sw=sh(w);D nw=n(w);
-  if(0==tw){
-    z=tn(0,3,nw);
-    for(D i=0;i<nw;i++){Q wi=qi(w,i);Q zi=mv(wi);
-      if(5==t(zi)){return zi;}
-      zid(z,i,zi);
-    }
-    return z;
-  }
-  return ac(0); // this is a signal to the verb that work should be done on the w parameter.
-}
+
 Q car(Q w){
   B s=sh(w);
   if(0==s){return w;}
@@ -142,7 +109,7 @@ Q car(Q w){
 }
 
 Q nt(Q w){
-  Q z=mvb(w,nt);
+  Q z=vb(0,w,nt,0,MB);
   if(5!=t(z)){return z;}if(c(z)){return z;} // if data is returned, return the data. if a control sentinel is returned and its payload is nonzero then return, otherwise listen to theh control signal to do the proper work.
   if(ia(w)){return an(!d(w));}
   if(1==sh(w)){z=tn(3,ls(w),n(w));for(D i=0;i<n(w);i++){pid(z,i,!pi(w,i));};return z;}
@@ -161,7 +128,7 @@ Q tl(Q w){
 }
 
 Q at(Q a,Q w){
-  Q z=ravb(a,w,at);
+  Q z=vb(a,w,0,at,RB);
   if(5!=t(z)){return z;}if(c(z)){return z;}
   B aa=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);z=tn(t(a),ls(a),nz);
   for(D i=0;i<nz;i++){
@@ -183,8 +150,8 @@ Q math(Q a,Q w,DV op){ // anything that gets here has been broadcasted. we can u
 }
 Q pl_aa(Q a,Q w){ return a+w;}
 Q ml_aa(Q a,Q w){ return a*w;}
-Q pl(Q a,Q w){Q z=dvb(a,w,pl);if(5!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
-Q ml(Q a,Q w){Q z=dvb(a,w,ml);if(5!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
+Q pl(Q a,Q w){Q z=vb(a,w,0,pl,DB);if(5!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
+Q ml(Q a,Q w){Q z=vb(a,w,0,ml,DB);if(5!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
 
 Q as(Q a,Q w){Q o=O[d(a)];ir(w);O[d(a)]=w;if(o&&ip(o)){dr(o);};return w;}
 

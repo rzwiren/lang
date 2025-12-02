@@ -79,10 +79,10 @@ void pr(Q q){
 DV VD[9];
 MV VM[9];
 
-Q id(Q a){return a;}
-Q en(Q a){B ai=ia(a);Q z=tn(ai?t(a):0,ls(a),1);if(ai){pid(z,0,d(a));}else{zid(z,0,a);};return z;}
-Q tp(Q a){return an(t(a));}
-Q ct(Q a){return an(n(a));}
+Q id(Q w){return w;}
+Q en(Q w){B aw=ia(w);Q z=tn(aw?t(w):0,ls(w),1);if(aw){pid(z,0,d(w));}else{zid(z,0,w);};return z;}
+Q tp(Q w){return an(t(w));}
+Q ct(Q w){return an(n(w));}
 
 typedef enum {DB,LB,RB,MB} BM; // broadcast mode
 Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=n(w);
@@ -100,13 +100,7 @@ Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=
   return ac(0);
 }
 
-Q car(Q w){
-  B s=sh(w);
-  if(0==s){return w;}
-  Q d=pi(w,0);
-  if(0==t(w)){return d;}
-  return et(d,t(w));
-}
+Q car(Q w){return qi(w,0);}
 
 Q nt(Q w){
   Q z=vb(0,w,nt,0,MB);
@@ -117,9 +111,7 @@ Q nt(Q w){
 }
 
 Q tl(Q w){
-  B aw=ia(w);
-  if(aw){w=en(w);}
-  D nw=n(w);Q z=tn(0,3,nw);
+  B aw=ia(w);if(aw){w=en(w);};D nw=n(w);Q z=tn(0,3,nw);
   for(D i=0;i<nw;i++){
     Q ni=pi(w,i);Q zi=tn(3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
     zid(z,i,zi);

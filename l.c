@@ -9,9 +9,13 @@ typedef struct {B t;B s;B z;D r;D n;Q pad;} AH;                               //
 typedef Q(*DV)(Q,Q);                                                          // function pointer for dyadic verb
 typedef Q(*MV)(Q);                                                            // function pointer for monadic verb
 
+Q* TH;D THI=0;D THC=0;
+Q SF[1024];
+
 AH* ah(Q q){return (AH*)q;}                                                   // all pointer allocations have AH behind the pointer. legal regardless of underlying shape
 
 B ip(Q q){return q&&!(7&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
+B itp(Q q){Q* ptr=(Q*)ah(q); return ip(q) && TH<=ptr && ptr < TH + THC; }     // Is this Q a pointer to the bump allocated region?
 Q d(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
 B*p(Q q){return (B*)(ah(q)+1);}                                               // pointers need no manipulation, low bits==0 is the signal for a pointer.
 B r(Q r){return d(r)+'a';}                                                    // transform an atom of type 1 into ascii. This is how we do variables for now. 
@@ -35,8 +39,10 @@ D n(Q a){B s=sh(a);return 0==s?1:1==s?ah(a)->n:0;}                            //
 
 void ir(Q q);void dr(Q q);                                                          // forward declare refcount helpers
 
-Q tsn(B t,B s,B z,D n){AH h={t,s,z,1,n,0};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;memset((void*)(o+1), 0, (1<<z)*n);return (Q)o;}  // LATER: custom allocator. Q points at data not header 
+Q tsng(B t,B s,B z,D n){AH h={t,s,z,0,n,0};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;memset((void*)(o+1), 0, (1<<z)*n);return (Q)o;}  // LATER: custom allocator. Q points at data not header 
+Q tsn(B t,B s,B z,D n){AH h={t,s,z,0,n,0};D bz=sizeof(AH)+(1<<z)*n;D qz=(bz+sizeof(Q)-1)/sizeof(Q);if(THC < THI+qz){printf("oom\n");exit(0);}AH*o=(AH*)(TH+THI);*o=h;memset((void*)(o+1), 0, (1<<z)*n);THI+=qz;return (Q)o;}  // LATER: custom allocator. Q points at data not header 
 Q tn(B t,B z,D n){return tsn(t,1,z,n);}
+
 
 // varwidth getters
 Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                        // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
@@ -49,13 +55,20 @@ void pid(Q q,D i,Q d){Bid(p(q),sz(q),i,d);}
 void zid(Q q,D i,Q d){Q o=pi(q,i);ir(d);pid(q,i,d);dr(o);}
 void qid(Q q,D i,Q d){if(!t(q)){zid(q,i,d);}else{pid(q,i,d);}}
 
-void ir(Q q){ if(ip(q)){ah(q)->r++;} return;}
+void ir(Q q){ if(ip(q)&&!itp(q)){ah(q)->r++;} return;}
 void dr(Q q){ 
-  if(!q || ia(q)){return;}                                                    // if null or atom just return
+  if(!q || ia(q) || itp(q)){return;}                                                    // if null or atom just return
   if(0< --(ah(q)->r)){return;}                                                // if there is a nonzero refcount return
   if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                              // this object has refcount==0. if type 0, recurse on children
   free((void*)q);                                                             // then free this q
   return;                                                                     // should I consider returning a control sentinel here (type)
+}
+Q t2g(Q q){
+  if(!itp(q)){return q;};
+  AH *h=ah(q);Q g=tsng(h->t,h->s,h->z,h->n);
+  if(t(q)){memcpy(p(g),p(q),(1<<h->z)*h->n);return g;}
+  for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};pid(g,i,v);}
+  return g;
 }
 
 Q O[26];
@@ -146,7 +159,7 @@ Q ml_aa(Q a,Q w){ return a*w;}
 Q pl(Q a,Q w){Q z=vb(a,w,0,pl,DB);if(5!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
 Q ml(Q a,Q w){Q z=vb(a,w,0,ml,DB);if(5!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
 
-Q as(Q a,Q w){Q o=O[d(a)];ir(w);O[d(a)]=w;if(o&&ip(o)){dr(o);};return w;}
+Q as(Q a,Q w){w=t2g(w);Q o=O[d(a)];ir(w);O[d(a)]=w;if(o&&ip(o)){dr(o);};return w;}
 
 Q ca(Q a,Q w){
   B tz=(t(a)==t(w))?t(a):0;
@@ -204,12 +217,14 @@ Q* pe(C*b){D l=strlen(b);Q* q=malloc(sizeof(Q)*(l+1));D i=0;
 
 C buffer[100];
 D main(void){
+  TH=(Q*)malloc(1<<16);THC=(1<<16)/sizeof(Q);
   while (1) {
     printf(" "); if (!fgets(buffer, 100, stdin)){break;}
     buffer[strcspn(buffer, "\r")] = '\0'; buffer[strcspn(buffer, "\n")] = '\0';
     if (strcmp(buffer, "\\\\") == 0){break;}
-    Q r=e(pe(buffer));pr(r);
-    dr(r);
+    THI=0;
+    Q r=e(pe(buffer));
+    pr(r);
   }
   return 0;
 }

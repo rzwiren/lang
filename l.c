@@ -96,6 +96,7 @@ Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=
       if(5==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
       zid(z,i,zi);
     }
+    return z;
   }
   return ac(0);
 }

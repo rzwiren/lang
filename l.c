@@ -229,17 +229,30 @@ Q edv(Q a,Q*q){
   DV dv=VD[i];
   return dv(a,w);
 }
+Q E(Q* q){
+  Q r = 0;
+  while(*q){
+    r = e(q);
+    // Find the end of the evaluated expression
+    while(*q && !(18==t(*q) && ';'==c(*q))) q++;
+    // If we found a semicolon, skip it to start the next expression
+    if(*q) q++;
+  }
+  return r;
+}
 Q e(Q* q){
   Q a=*q;
   if(!a){return tsn(4,1,3,0);}                                 // If a is the end of the stream then we must have missing data. return type 4
-  Q w=q[1];                                                    // we know a is non zero, so we can read q[1] but it may be end of stream, need to check if it is 0
-  return (2==t(a)&&w)  ?                                   // if a is a verb and w isn't the end of the stream
+  if(18==t(a) && ';'==c(a)){return tsn(4,1,3,0);}              // Semicolon is a statement terminator, acts as end-of-stream for this expression.
+  Q w=q[1];                                                    // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
+  B end = !w || (18==t(w) && ';'==c(w));                        // end of expression is null or semicolon
+  return (2==t(a)&&!end)  ?                                // if a is a verb and w isn't the end of the stream
          emv(q)        :                                       //  then evaluate a monadic verb
-         (2==t(a)&&!w) ?                                   // if a is a verb and we have hit the end of the stream
+         (2==t(a)&&end) ?                                   // if a is a verb and we have hit the end of the stream
          Ap(a)         :                                       //  then create a dyadic partial evaluation
-         (w&&2==t(w))  ?                                   // if w is non-zero and is a verb
+         (!end&&2==t(w))  ?                                   // if w is non-zero and is a verb
          edv(a,q+1)    :                                       //  then eval dyadic verb
-         (4==t(a)&&!w) ?                                   // if a is a partial evaluation and we don't have a w 
+         (4==t(a)&&end) ?                                   // if a is a partial evaluation and we don't have a w 
          a             :                                       //  then just return the partial up the stack. 
          (1==t(a))     ?                                       // if a is a reference (and not being assigned to)
          get(d(a))     :                                       //  then return the value of the reference
@@ -260,7 +273,7 @@ Q parse_b(C* s, D len, D base){
 // CClass(cc):0-nul,1-spc,2-alp,3-dig,4-dot,5-qot,6-bqt,7-ver,8-ctl,9-adv,10-oth,11-neg
 // Character class lookup table. Maps ASCII chars ' ' (32) to '~' (126) to a class index.
 //              !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
-static C* CST="1757AAA988777B4933333333337AAAAA722222222222222222222222222898AA62222222222222222222222222228A87";
+static C* CST="1757AAA988777B49333333333378AAAA722222222222222222222222222898AA62222222222222222222222222228A87";
 D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
 Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
   D TT[7][12]={ // Transition Table
@@ -304,7 +317,7 @@ D main(void){
     buffer[strcspn(buffer, "\r")] = '\0'; buffer[strcspn(buffer, "\n")] = '\0';
     if (strcmp(buffer, "\\\\") == 0){break;}
     THI=0;
-    Q r=e(lx(buffer));
+    Q r=E(lx(buffer));
     pr(r);
   }
   return 0;

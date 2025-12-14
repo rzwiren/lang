@@ -5,19 +5,17 @@
 #include <string.h>
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
-typedef struct {B t;B s;B z;D r;D n;Q pad;} AH;                               // header for all heap allocated objects. type,shape,eltsize,refcount,length. MUST be at least 8 byte aligned or the allocator and pointer tagging scheme don't work
+// typedef struct {B t;B s;B z;D r;D n;Q pad;} AH;                               // header for all heap allocated objects. type,shape,eltsize,refcount,length. MUST be at least 8 byte aligned or the allocator and pointer tagging scheme don't work
 typedef Q(*DV)(Q,Q);                                                          // function pointer for dyadic verb
 typedef Q(*MV)(Q);                                                            // function pointer for monadic verb
 
 Q* TH;D THI=0;D THC=0;
 Q SF[1024];
 
-AH* ah(Q q){return (AH*)q;}                                                   // all pointer allocations have AH behind the pointer. legal regardless of underlying shape
-
 B ip(Q q){return q&&!(7&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
-B itp(Q q){Q* ptr=(Q*)ah(q); return ip(q) && TH<=ptr && ptr<TH+THC; }         // Is this Q a pointer to the bump allocated region?
+B itp(Q q){Q* ptr=(Q*)q; return ip(q) && TH<=ptr && ptr<TH+THC; }         // Is this Q a pointer to the bump allocated region?
 Q d(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
-B*p(Q q){return (B*)(ah(q)+1);}                                               // pointers need no manipulation, low bits==0 is the signal for a pointer.
+B*p(Q q){return (B*)(((Q*)q)+5);}                                               // pointers need no manipulation, low bits==0 is the signal for a pointer.
 B v(Q q){return q>>5;}                                                        // verbs are grammatical type, subtype 0. payload in high 59 bits
 B a(Q q){return q>>5;}
 B c(Q q){return q>>5;}                                                        // controls are grammatical type, subtype 2. payload in high 59 bits
@@ -33,21 +31,24 @@ Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):ac(q);} 
 
 B ia(Q q){return !ip(q);}                                                     // is atom  from pointer
 B t(Q q){
-  if(!ia(q))return ah(q)->t;
+  if(!ia(q))return ((Q*)q)[0];
   B tag=q&7;
   if(tag==2)return q&31;
   return tag;
 }
-B sh(Q q){return ia(q)?0:ah(q)->s;}                                           // shape    from header
-B ls(Q q){return ia(q)?3:ah(q)->z;}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
+B sh(Q q){return ia(q)?0:((Q*)q)[1];}                                           // shape    from header
+B ls(Q q){return ia(q)?3:((Q*)q)[2];}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
 B sz(Q q){return 1<<ls(q);}                                                   // bytesz   from logeltsz
-D rc(Q q){return !q?0:ia(q)?1:ah(q)->r;}                                      // refcnt   from header
-D n(Q a){B s=sh(a);return 0==s?1:1==s?ah(a)->n:0;}                            // length   from header
+D rc(Q q){return !q?0:ia(q)?1:((Q*)q)[3];}                                      // refcnt   from header
+D n(Q a){B s=sh(a);return 0==s?1:1==s?((Q*)a)[4]:0;}                            // length   from header
 
 void ir(Q q);void dr(Q q);                                                          // forward declare refcount helpers
 
-Q tsng(B t,B s,B z,D n){AH h={t,s,z,0,n,0};AH*o=malloc(sizeof(AH)+(1<<z)*n);*o=h;memset((void*)(o+1), 0, (1<<z)*n);return (Q)o;}  // LATER: custom allocator. Q points at data not header 
-Q tsn(B t,B s,B z,D n){AH h={t,s,z,0,n,0};D bz=sizeof(AH)+(1<<z)*n;D qz=(bz+sizeof(Q)-1)/sizeof(Q);if(THC < THI+qz){printf("oom\n");exit(0);}AH*o=(AH*)(TH+THI);*o=h;memset((void*)(o+1), 0, (1<<z)*n);THI+=qz;return (Q)o;}  // LATER: custom allocator. Q points at data not header 
+Q tsng(B t,B s,B z,D n){Q*o=malloc((sizeof(Q)*5)+(1<<z)*n);o[0]=t;o[1]=s;o[2]=z;o[3]=0;o[4]=n;memset((void*)(o+5), 0, (1<<z)*n);return (Q)o;}  // LATER: custom allocator. Q points at header
+Q tsn(B t,B s,B z,D n){
+  D bz=(sizeof(Q)*5)+(1<<z)*n;D qz=(bz+sizeof(Q)-1)/sizeof(Q);if(THC < THI+qz){printf("oom\n");exit(0);}Q*o=(Q*)(TH+THI);
+  o[0]=t;o[1]=s;o[2]=z;o[3]=0;o[4]=n;memset((void*)(o+5), 0, (1<<z)*n);THI+=qz;return (Q)o;
+}
 Q tn(B t,B z,D n){return tsn(t,1,z,n);}
 
 
@@ -74,18 +75,18 @@ void pid(Q q,D i,Q d){Bid(p(q),sz(q),i,d);}
 void zid(Q q,D i,Q d){Q o=pi(q,i);ir(d);pid(q,i,d);dr(o);}
 void qid(Q q,D i,Q d){if(!t(q)){zid(q,i,d);}else{pid(q,i,d);}}
 
-void ir(Q q){ if(ip(q)&&!itp(q)){ah(q)->r++;} return;}
+void ir(Q q){ if(ip(q)&&!itp(q)){((Q*)q)[3]++;} else if(itp(q)){dr(q);}return;}
 void dr(Q q){ 
   if(!q || ia(q) || itp(q)){return;}                                          // if null or atom just return
-  if(0< --(ah(q)->r)){return;}                                                // if there is a nonzero refcount return
+  if(0< --((Q*)q)[3]){return;}                                                // if there is a nonzero refcount return
   if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                              // this object has refcount==0. if type 0, recurse on children
   free((void*)q);                                                             // then free this q
   return;                                                                     // should I consider returning a control sentinel here (type)
 }
 Q t2g(Q q){
   if(!itp(q)){return q;};
-  AH *h=ah(q);Q g=tsng(h->t,h->s,h->z,h->n);
-  if(t(q)){memcpy(p(g),p(q),(1<<h->z)*h->n);return g;}
+  Q *h=((Q*)q);Q g=tsng(h[0],h[1],h[2],h[4]); ((Q*)g)[3]=h[3]; // copy header, including refcount
+  if(t(q)){memcpy(p(g),p(q),(1<<h[2])*h[4]);return g;}
   for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};pid(g,i,v);}
   return g;
 }
@@ -155,7 +156,7 @@ Q car(Q w){return qi(w,0);}
 
 Q nt(Q w){
   Q z=vb(0,w,nt,0,MB);
-  if(18==t(z)){return z;}if(c(z)){return z;} // if data is returned, return the data. if a control sentinel is returned and its payload is nonzero then return, otherwise listen to theh control signal to do the proper work.
+  if(18!=t(z)){return z;}if(c(z)){return z;} // if data is returned, return the data. if a control sentinel is returned and its payload is nonzero then return, otherwise listen to theh control signal to do the proper work.
   if(ia(w)){return an(!d(w));}
   if(1==sh(w)){z=tn(3,ls(w),n(w));for(D i=0;i<n(w);i++){pid(z,i,!pi(w,i));};return z;}
   return ac(1); // return shape error
@@ -172,7 +173,7 @@ Q tl(Q w){
 
 Q at(Q a,Q w){
   Q z=vb(a,w,0,at,RB);
-  if(18==t(z)){return z;}if(c(z)){return z;}
+  if(18!=t(z)){return z;}if(c(z)){return z;}
   B aa=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);z=tn(t(a),ls(a),nz);
   for(D i=0;i<nz;i++){
     Q wi=ri(w,i);Q zi=ri(a,wi);
@@ -193,8 +194,8 @@ Q math(Q a,Q w,DV op){ // anything that gets here has been broadcasted. we can u
 }
 Q pl_aa(Q a,Q w){ return a+w;}
 Q ml_aa(Q a,Q w){ return a*w;}
-Q pl(Q a,Q w){Q z=vb(a,w,0,pl,DB);if(t(z)!=18){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
-Q ml(Q a,Q w){Q z=vb(a,w,0,ml,DB);if(t(z)!=18){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
+Q pl(Q a,Q w){Q z=vb(a,w,0,pl,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
+Q ml(Q a,Q w){Q z=vb(a,w,0,ml,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
 
 Q set(Q a,Q w){
   w=t2g(w); Q k=d(a);

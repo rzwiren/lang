@@ -8,6 +8,7 @@
 #endif
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
+typedef long long J; typedef int I; typedef short H;
 typedef Q(*DV)(Q,Q);                                                          // function pointer for dyadic verb
 typedef Q(*MV)(Q);                                                            // function pointer for monadic verb
 
@@ -58,11 +59,11 @@ D cn(B t,B s,D n){                                                              
   if(0==n){return 1;}
   return n+(n>>1)+(n>>3);                                                       // n+n/2+n/8 to approximate 1.618 LATER: overflow fix
 } 
-Q pz(B z,D c){ return qbz((1<<z)*c);}                                           // payload size in bytes by shape, log elt size, and capacity
+Q pz(B z,D c){ return (1<<z)*c;}                                           // payload size in bytes by shape, log elt size, and capacity
 void ah(Q* h,B t,B s,B z,D r,D n,D c){h[0]=t;h[1]=s;h[2]=z;h[3]=r;h[4]=n;h[5]=c;} // allocate the header. 
 Q tsni(B t,B s,B z,D n,D c,B g){                                                    // LATER: custom allocator. Q points at header
   Q p=pz(z,c);Q qz=hz()+p;
-  Q*o;if(g){o=malloc(qz);}else{if(THC<THI+qz){printf("oom\n");exit(0);};o=(Q*)(TH+THI);THI+=qz;}
+  Q*o;if(g){o=malloc(qz);}else{if(THC<THI+qbz(qz)){printf("oom\n");exit(0);};o=(Q*)(TH+THI);THI+=qbz(qz);}
   ah(o,t,s,z,0,n,c);
   memset((void*)(o+6),0,p);
   return (Q)o;
@@ -76,13 +77,15 @@ Q lc(D c,B g){return vc(0,3,c,g);}
 
 void zid(Q q,D i,Q d);
 Q dni(B t,B z,D n,B g){                                                              // alloc a dictionary of a certain type and element size with hash table capacity n. 
-  D c=cn(5,1,n);Q h=vc(5,2,c,g);                                                  // n means keycount for hash.
-  Q k=lc(c,g);Q v=vc(t,z,c,g);
-  Q d=tsni(0,2,3,3,3,g);zid(d,0,h);zid(d,1,k);zid(d,2,v);
+  D c=cn(5,1,n);
+  Q h=vc(5,2,c,g);                                                  // n means keycount for hash.
+  Q k=lc(c,g);
+  Q v=vc(t,z,c,g);
+  Q d=tsni(0,2,3,3,3,g);
+  zid(d,0,h);zid(d,1,k);zid(d,2,v);
   return d;
 }
 Q dn(B t,B z,D n){return dni(t,z,n,0);}
-
 
 // varwidth getters
 Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                          // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
@@ -136,35 +139,39 @@ Q fk(D* ht,Q k,D c,Q keys){                                                     
     if(pi(keys, e-1) == k) return i;                                            // key match
     i = (i + 1) & mask;
   }
-  return c; // Sentinel for "table is full and key not found"
+  return c;                                                                     // Sentinel for "table is full and key not found"
 } 
-Q dk(Q d,Q k){
-  Q htq=pi(d,0);D* ht=(D*)p(htq);D c=cp(htq);
-  D i=fk(ht,k,c,pi(d,1));
-  if (i == c) return ac(4); // not found: table is full and key isn't in it.
-  D e = ht[i];
-  if(!e) return ac(4);        // not found
-  return qi(pi(d,2), e-1);
+Q SC[1024]; D SP=0;Q G;
+
+Q dki(Q d, Q k){                                                                // inner "dictionary key" lookup for a single dictionary
+  if(!ip(d)||2!=sh(d)) return 0;                                                // Not a dictionary
+  Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
+  D* ht=(D*)p(htq); D c=cp(htq);
+  D i=fk(ht,k,c,kq);
+  if(i==c){return 0;}                                                           // Not found
+  D e=ht[i];
+  return e?qi(vq,e-1):0;                                                        // Found, or empty slot
+}
+
+Q dk(Q d, Q k){ // outer "dictionary key" lookup with scope traversal
+  Q r=dki(d,k);if(r){return r;}
+  for (I j=SP; j>=0; j--) {  // Search from the current scope (SP) down to scope 0
+    Q r = dki(SC[j], k);
+    if(r){return r;}
+  }
+  r=dki(G, k);  // If not found in scopes, try the global dictionary G
+  return r?r:ac(4); // Return result from G or "not found"
 }
 Q dkv(Q d,Q k,Q v){
-   // extract components
-  Q htq = pi(d,0);
-  Q kq  = pi(d,1);
-  Q vq  = pi(d,2);
-  D* ht = (D*)p(htq);
-  D  c  = cp(htq);
-  // find slot
-  D i = fk(ht,k,c,kq);
-  if (i == c) {
-    // Table is full, we need to grow it.
-    // For now, we'll just return an error. The 'grow' call would go here.
-    return ac(6); // Rank error, or some other "capacity" error
-  }
-  D e = ht[i];
-  if(e){
-    // overwrite existing value
-    D idx = e - 1;
-    Q old = pi(vq, idx);
+  Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
+  D* ht=(D*)p(htq);
+  D c=cp(htq);
+  D i=fk(ht,k,c,kq);
+  if(i==c){return ac(6);}
+  D e=ht[i];
+  if(e){ // overwrite existing value
+    D idx=e-1;
+    Q old=pi(vq, idx);
     ir(v);
     pid(vq, idx, v);
     dr(old);
@@ -188,11 +195,19 @@ void dr(Q q){
 Q t2g(Q q){
   if(!itp(q)){return q;};
   Q *h=((Q*)q);Q g=tsng(h[0],h[1],h[2],h[4]); ((Q*)g)[3]=h[3];((Q*)g)[5]=h[5]; // copy header, including refcount and capacity
-  if(t(q)){memcpy(p(g),p(q),(1<<h[2])*h[4]);return g;}
-  for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};pid(g,i,v);}
+  if(1==sh(q)){
+    if(t(q)){memcpy(p(g),p(q),(1<<h[2])*h[4]);return g;}
+    for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};pid(g,i,v);}
+  }
+  if(2==sh(q)){
+    pid(g,0,t2g(pi(q,0))); printf("copied hash from %lld\n",pi(q,0)); // copy hashfrom // copy hash
+    pid(g,1,t2g(pi(q,1))); printf("copied keys from %lld\n",pi(q,1));// copy keys
+    pid(g,2,t2g(pi(q,2))); printf("copied values from %lld\n",pi(q,2));// copy values
+  }
+  
   return g;
 }
-Q G;
+
 C* VT;
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
@@ -203,20 +218,26 @@ void pr(Q q){
   if(0==t(q)){
     if(!sh(q)){printf("atom type 0?%lld ",q);}
     if(1==sh(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
-    if(2==sh(q)){printf("dictionary: %lld \n",q);}
+    if(2==sh(q)){
+      printf("{");
+      Q kq = pi(q,1);Q nkq=n(kq);
+      for(D i=0; i<n(kq); ++i){
+        pr(pi(kq,i)); printf(":");
+        pr(qi(pi(q,2),i));printf(i==nkq-1?"}":";");
+      }
+    }
   }
-  if(1==t(q)){pr_b(d(q),62); printf(" "); pr(dk(G,q));}
+  if(1==t(q)){pr_b(d(q),62);}
   if(2==t(q)){printf("%c",VT[v(q)]);}
-  if(10==t(q)){printf("adverb: %c\n",q>>5);}
+  if(10==t(q)){printf("adverb: %c\n",a(q));}
   if(18==t(q)){printf("control: %d\n",c(q));}
   if(3==t(q)){
     if(0==sh(q)){printf("%lld",d(q));}
-    if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld ",pi(q,i));}} else {printf("!0 ");}}
+    if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld",pi(q,i));if(i<n(q)-1){printf(" ");}}} else {printf("!0");}}
   }
   if(5==t(q)){printf("hash table: %lld \n",q);}
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   if(7==t(q)){printf("`");pr_b(d(q),62);}
-  printf("\n");
 }
 DV VD[9];
 MV VM[9];
@@ -291,8 +312,8 @@ Q ml_aa(Q a,Q w){ return a*w;}
 Q pl(Q a,Q w){Q z=vb(a,w,0,pl,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
 Q ml(Q a,Q w){Q z=vb(a,w,0,ml,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
 
-Q set(Q a,Q w){
-  w=t2g(w); dkv(G,a,w);
+Q set(Q a,Q w,D sp){
+  dkv(SC[sp],a,w);
   return w;
 }
 
@@ -304,41 +325,69 @@ Q ca(Q a,Q w){
   return z;
 }
 
-DV VD[9]={0,0,0,at,0,pl,ml,set,ca};
+DV VD[9]={0,0,0,at,0,pl,ml,0,ca};
 MV VM[9]={0,nt,tl,tp,ct,0,car,id,en};
 C* VT=" ~!@#+*:,";
 
 Q Ap(Q a){Q p=tsn(4,1,3,1);pid(p,0,a);return p;}
 Q e(Q* q);
+Q E(Q* q,C tc);
+Q eoc(Q* q){
+  if(SP+1 >= 1024) return ac(6); // scope depth overflow
+  SP++;D csp=SP; // cache the SP of this new allocation, return that.
+  SC[SP] = dn(0,3,0); // Allocate new dictionary for the new scope
+  E(q+1,'}'); // Evaluate the inner expression
+  return SC[csp]; // Return the created dictionary
+}
+
+Q ecc(Q* q){
+  if(SP > 0) SP--;
+  return tsn(4,1,3,0); // Behave like a semicolon, terminating the expression
+}
+
 Q emv(Q*q){
   Q w=e(q+1);
   if(4==t(w)){Q p=tsn(4,1,3,1);pid(p,0,*q);return ca(p,w);}
   return VM[v(*q)](w);
 }
+
 Q edv(Q a,Q*q){
+  D current_sp = SP; // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q+1);B i=v(*q);
   if(4==t(w)&&(7!=i)){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,*q);return ca(p,w);}  // handle partial evaluations but allow assignment of them instantly. 
-  a=((1==t(a))&&(7!=i))?dk(G,a):a;
+  a=((1==t(a))&&(7!=i))?dk(SC[SP],a):a;
+  // If this is an assignment, use the cached scope pointer to write into the correct scope.
+  if(7==i){return set(a,w,current_sp);}
   DV dv=VD[i];
   return dv(a,w);
 }
-Q E(Q* q){
+
+Q E(Q* q, C tc){
   Q r = 0;
-  while(*q){
+  while(*q && !(18==t(*q)&&tc==c(*q))){
     r = e(q);
     // Find the end of the evaluated expression
-    while(*q && !(18==t(*q) && ';'==c(*q))) q++;
+    while(*q && !(18==t(*q) && c(*q)==';')) q++;
     // If we found a semicolon, skip it to start the next expression
     if(*q) q++;
   }
   return r;
 }
+
 Q e(Q* q){
   Q a=*q;
   if(!a){return tsn(4,1,3,0);}                                 // If a is the end of the stream then we must have missing data. return type 4
-  if(18==t(a) && ';'==c(a)){return tsn(4,1,3,0);}              // Semicolon is a statement terminator, acts as end-of-stream for this expression.
+  if(18==t(a) && ';'==c(a)){return tsn(4,1,3,0);}              
+  if(18==t(a)){
+    if('{'==c(a)) return eoc(q);                                // this creates a scope dictionary and returns it.
+    if('}'==c(a)) return ecc(q);                                // this terminates a scope dictionary and behaves like a semicolon
+    if(';'==c(a)) return tsn(4,1,3,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
+  }
   Q w=q[1];                                                    // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
-  B end = !w || (18==t(w) && ';'==c(w));                        // end of expression is null or semicolon
+  B endexpr = !w || (18==t(w) && c(w)==';');         // end of expression is null or semicolon or }
+  B endscope = w && (18==t(w) && c(w)=='}');                 // end of scope is }
+  B end = endexpr || endscope;
+  if(endscope){ecc(q);}
   return (2==t(a)&&!end)  ?                                // if a is a verb and w isn't the end of the stream
          emv(q)        :                                       //  then evaluate a monadic verb
          (2==t(a)&&end) ?                                   // if a is a verb and we have hit the end of the stream
@@ -348,7 +397,7 @@ Q e(Q* q){
          (4==t(a)&&end) ?                                   // if a is a partial evaluation and we don't have a w 
          a             :                                       //  then just return the partial up the stack. 
          (1==t(a))     ?                                       // if a is a reference (and not being assigned to)
-         dk(G,a)       :                                       //  then return the value of the reference
+         dk(SC[SP],a)  :                                       //  then return the value of the reference
          a             ;                                       //  otherwise this must be data, return the data.
 }
 
@@ -366,7 +415,7 @@ Q parse_b(C* s, D len, D base){
 // CClass(cc):0-nul,1-spc,2-alp,3-dig,4-dot,5-qot,6-bqt,7-ver,8-ctl,9-adv,10-oth,11-neg
 // Character class lookup table. Maps ASCII chars ' ' (32) to '~' (126) to a class index.
 //              !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
-static C* CST="1757AAA988777B49333333333378AAAA722222222222222222222222222898AA62222222222222222222222222228A87";
+static C* CST="1757AAA988777B49333333333378AAAA722222222222222222222222222898AA6222222222222222222222222228A87";
 D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
 Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
   D TT[7][12]={ // Transition Table
@@ -404,14 +453,21 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
 C buffer[100];
 D main(void){
   TH=(Q*)malloc(1<<16);THC=(1<<16)/sizeof(Q);
-  G=dni(0,3,0,1);
+  G=dni(0,3,0,1); // global dictionary
+  SC[0]=dni(0,3,0,0); SP=0;
   while (1) {
     printf(" "); if (!fgets(buffer, 100, stdin)){break;}
     buffer[strcspn(buffer, "\r")] = '\0'; buffer[strcspn(buffer, "\n")] = '\0';
     if (strcmp(buffer, "\\\\") == 0){break;}
-    THI=0;
-    Q r=E(lx(buffer));
-    pr(r);
+    if(0==SP){
+      for(D i=0;i<n(pi(SC[0],1));i++){
+        Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
+        dkv(G,gk,gv);
+      }
+      THI=0;SC[0]=dni(0,3,0,0); SP=0; 
+     } // reset THI only if evaluation takes us back to the global scope. 
+    Q r=E(lx(buffer),'\0');
+    pr(r);printf("\n");
   }
   return 0;
 }

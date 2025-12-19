@@ -75,6 +75,7 @@ Q ln(D n){return vn(0,3,n);}
 Q vc(B t,B z,D c,B g){return tsni(t,1,z,0,c,g);}
 Q lc(D c,B g){return vc(0,3,c,g);}
 
+void pr(Q q);
 void zid(Q q,D i,Q d);
 Q dni(B t,B z,D n,B g){                                                              // alloc a dictionary of a certain type and element size with hash table capacity n. 
   D c=cn(5,1,n);
@@ -89,14 +90,19 @@ Q dn(B t,B z,D n){return dni(t,z,n,0);}
 
 // varwidth getters
 Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                          // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
-Q pi(Q q,D i){if(n(q)<=i){return ac(2);};return Bi(p(q),sz(q),i);}              // throw length error when i outside of n
+Q pi(Q q,D i){return Bi(p(q),sz(q),i);}              
 Q ri(Q q,D i){
   if(1==sh(q)){return pi(q,i);}
+  printf("non shape 1 ri call\n");
   return ac(1);                                                                 // shape error
 }
-Q qi(Q q,D i){B s=sh(q),tq=t(q);return 1==s?et(pi(q,i),tq):ac(1);}              // get at index, return tagged Q
+Q vi(D n,D i){if(i>=n){return ac(2);};return an(i);}
+Q qi(Q q,D i){B s=sh(q),tq=t(q);
+  if(1==s){Q qi=vi(n(q),i);return 18==t(qi)?(printf("qi badidx\n"),qi):et(pi(q,d(qi)),tq);};
+  return (printf("non shape 1 qi call\n"),ac(1));
+}              // get at index, return tagged Q
 Q ra(Q q){                                                                      // read atom
-  if(sh(q)){return ac(1);}
+  if(sh(q)){printf("ra: not an atom\n");return ac(1);}
   switch(t(q)){
     case 1:  return d(q);
     case 2:  return v(q);
@@ -160,7 +166,8 @@ Q dk(Q d, Q k){ // outer "dictionary key" lookup with scope traversal
     if(r){return r;}
   }
   r=dki(G, k);  // If not found in scopes, try the global dictionary G
-  return r?r:ac(4); // Return result from G or "not found"
+  if(r){return r;}
+  return ac(4); // Return result from G or "not found"
 }
 Q dkv(Q d,Q k,Q v){
   Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
@@ -194,15 +201,15 @@ void dr(Q q){
 }
 Q t2g(Q q){
   if(!itp(q)){return q;};
-  Q *h=((Q*)q);Q g=tsng(h[0],h[1],h[2],h[4]); ((Q*)g)[3]=h[3];((Q*)g)[5]=h[5]; // copy header, including refcount and capacity
+  Q *h=((Q*)q);Q g=tsng(h[0],h[1],h[2],h[4]); // copy header, ignore refcount and capacity
   if(1==sh(q)){
     if(t(q)){memcpy(p(g),p(q),(1<<h[2])*h[4]);return g;}
-    for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};pid(g,i,v);}
+    for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};zid(g,i,v);}
   }
   if(2==sh(q)){
-    pid(g,0,t2g(pi(q,0))); printf("copied hash from %lld\n",pi(q,0)); // copy hashfrom // copy hash
-    pid(g,1,t2g(pi(q,1))); printf("copied keys from %lld\n",pi(q,1));// copy keys
-    pid(g,2,t2g(pi(q,2))); printf("copied values from %lld\n",pi(q,2));// copy values
+    zid(g,0,t2g(pi(q,0))); // copy hashfrom // copy hash
+    zid(g,1,t2g(pi(q,1))); // copy keys
+    zid(g,2,t2g(pi(q,2))); // copy values
   }
   
   return g;
@@ -216,9 +223,11 @@ void pr_b(Q q,D b){if(q<b){printf("%c",MAP[q]);return;}pr_b(q/b,b);printf("%c",M
 void pr(Q q){
   if(0==q){return;}
   if(0==t(q)){
+    
     if(!sh(q)){printf("atom type 0?%lld ",q);}
-    if(1==sh(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
+    if(1==sh(q)){printf("(");D nq=n(q);for(D i=0;i<nq;i++){pr(pi(q,i));if(i<nq-1){printf(";");}}; printf(")");}
     if(2==sh(q)){
+      //pr(pi(q,0)); // print hash
       printf("{");
       Q kq = pi(q,1);Q nkq=n(kq);
       for(D i=0; i<n(kq); ++i){
@@ -226,6 +235,7 @@ void pr(Q q){
         pr(qi(pi(q,2),i));printf(i==nkq-1?"}":";");
       }
     }
+   
   }
   if(1==t(q)){pr_b(d(q),62);}
   if(2==t(q)){printf("%c",VT[v(q)]);}
@@ -235,8 +245,8 @@ void pr(Q q){
     if(0==sh(q)){printf("%lld",d(q));}
     if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld",pi(q,i));if(i<n(q)-1){printf(" ");}}} else {printf("!0");}}
   }
-  if(5==t(q)){printf("hash table: %lld \n",q);}
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
+  if(5==t(q)){printf("hash table: ");for(D i=0;i<((Q*)q)[5];i++){printf("%d:%d ",i,pi(q,i));}printf("\n");}
   if(7==t(q)){printf("`");pr_b(d(q),62);}
 }
 DV VD[9];
@@ -291,7 +301,7 @@ Q at(Q a,Q w){
   if(aw){return aa?a:qi(a,ra(w));}
   z=vn(t(a),ls(a),nz);
   for(D i=0;i<nz;i++){ // unmerge this. use shape of w to dispatch. 
-    Q wi=ri(w,i);Q zi=ri(a,wi);
+    Q zi=ri(a,aw?ra(w):ri(w,i));
     qid(z,i,zi);
   }
   return z;
@@ -319,9 +329,9 @@ Q set(Q a,Q w,D sp){
 
 Q ca(Q a,Q w){
   B tz=(t(a)==t(w))?t(a):0;
-  D j=0;D ca=n(a);D cw=n(w);Q z=vn(tz,tz?ls(a):3,ca+cw);
-  for(D i=0;i<ca;i++,j++){Q ai=at(a,an(i));qid(z,j,tz?ra(ai):ai);} // decode if not type 0
-  for(D i=0;i<cw;i++,j++){Q wi=at(w,an(i));qid(z,j,tz?ra(wi):wi);} // decode if atom or somethig
+  D j=0;D na=n(a),nw=n(w);Q z=vn(tz,tz?ls(a):3,na+nw);
+  for(D i=0;i<na;i++,j++){Q ai=at(a,an(i));qid(z,j,tz?ra(ai):ai);} // decode if not type 0
+  for(D i=0;i<nw;i++,j++){Q wi=at(w,an(i));qid(z,j,tz?ra(wi):wi);} // decode if atom or somethig
   return z;
 }
 
@@ -355,7 +365,7 @@ Q edv(Q a,Q*q){
   D current_sp = SP; // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q+1);B i=v(*q);
   if(4==t(w)&&(7!=i)){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,*q);return ca(p,w);}  // handle partial evaluations but allow assignment of them instantly. 
-  a=((1==t(a))&&(7!=i))?dk(SC[SP],a):a;
+  a=((1==t(a))&&(7!=i))?dk(SC[current_sp],a):a;
   // If this is an assignment, use the cached scope pointer to write into the correct scope.
   if(7==i){return set(a,w,current_sp);}
   DV dv=VD[i];
@@ -462,7 +472,7 @@ D main(void){
     if(0==SP){
       for(D i=0;i<n(pi(SC[0],1));i++){
         Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
-        dkv(G,gk,gv);
+        dkv(G,t2g(gk),t2g(gv));
       }
       THI=0;SC[0]=dni(0,3,0,0); SP=0; 
      } // reset THI only if evaluation takes us back to the global scope. 

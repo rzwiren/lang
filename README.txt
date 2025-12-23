@@ -48,36 +48,43 @@ Areas explored:
   disk
   network
 How do each of the explored areas overlap?
-  What tradeoffs can we make in one area to benefit another and the whole systemand what tradeoffs various choices introduce
+  What tradeoffs can we make in one area to benefit another and the whole system and what tradeoffs various choices introduce
   Indexing
    how does indexing into data relate to function dispatch?
 
-=======
-
-Memory allocation factors for consideration: 
-A range of low bits in a pointer can be guaranteed to be 0 by changing the smallest allocation size. 
-byte aligned is multiple of 8   000
-w    aligned                16  0000
-d                           32  00000
-q                           64  000000
-o                           128 0000000
-h                           256 00000000
-i                           512 000000000
-
-and so on.
-Address space is plentiful. even with 512 byte alignment we have room for 2^39~=549 billion allocations.
-That's far more than any practical workload would need. 
-That makes me want to do saves to disk with nearly raw memory dumps. Run length encoding would compress awesomely. 
-a smaller alignment would allow for mapping in place without blowing out disk too much though... 
-
-if I go with 512 byte alignment then I have a 16 39 9 pointer setup
-this gives me 25 bits to play with
-I use 8 for type width and shape already
-17 free bits for other purposes. 
-so that means monadic verbs get 17 free bits
-and dyadic verbs get 34 free bits
-what can I use the free bits for?
-I can encode in a single bit whether an argument can be reused without reallocating a new object
-I can encode the verb in some other bits. this might be useful in order to save space during dispatch
-I can also carry a refcount around. 16 bit refcounts will definitely overflow though. 
-
+This interpreter is essentially an abstract machine. It works off of a Q (quadword/64bit) register size.
+ A Q has different representations based on the metadata stored in the lower bits. 
+ The system assumes the smallest possible alignment is 16 byte alignment. 
+  This means that any pointer type object will have 4 free low bits. 3 are currently in use.
+  Those 3 low bits are used to encode a type tag
+   0 - pointer like object
+   1 - reference
+   2 - grammatical
+   3 - number
+   4 - partial evaluation. never atom (eventually move this into grammatical?)
+   5 - hash. never atom.
+   6 - unused
+   7 - symbol
+  the metadata in a Q is type dependent (p:payload,f:fileid,a:arenaid,o:order,t:typetag)
+   0 -
+    file backed (a=7) 37p16f3a5o3t
+    ram backed (a in 0..6) 53p3a5o3t
+   1,3,7 - 61p3t
+   2 - 59p2t3t (there are 2 more bits worth of subtypes for the grammatical types with low bits == 2)
+the arena portion of a Q is a way for the system to find the base address used to calculate the true pointer to that Q
+the payload part of the Q constitutes the offset. 
+ The offset is stored in units of the minimum allocation granularity for that arenas allocator
+ e.g. if the min allocation granularity is 2^12 then the offset 0+base is pointing at a range of 2^12 bytes.
+ allocators will respect alignment based on the minimum allocation granularity which is at least 16 bytes. 
+the order portion of pointer like Q objects is 5 bits because 
+ 31 distinct monotonically increasing allocation sizes should be sufficient regardless of the allocator backing the arena.
+ temp arena (bump allocated)
+  smallest size of allocation is 16 bytes, 
+  largest is 8 bytes*2^32
+  needs 
+ global arena (buddy)
+  min size 2^12 bytes (page)
+  max size 8*2^32 bytes
+ the largest vector size is currently 2^32 
+ and the minimum allocation size is 16 bytes 
+ so any allocator implementation needs 5 bits to represent all possible allocation sizes. 

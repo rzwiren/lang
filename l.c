@@ -5,6 +5,7 @@
 #include <string.h>
 #if defined(_MSC_VER)
   #include <intrin.h>
+  #include <malloc.h>
 #endif
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
@@ -12,13 +13,15 @@ typedef long long J; typedef int I; typedef short H;
 typedef Q(*DV)(Q,Q);                                                          // function pointer for dyadic verb
 typedef Q(*MV)(Q);                                                            // function pointer for monadic verb
 
-Q* TH;D THI=0;D THC=0;
-Q SF[1024];
+Q* AB[8];Q AI[8];Q AC[8];
+B ha(Q q){return (q>>8)&7;}
+Q hp(Q q){return q>>11;}
+Q* ptr(Q q){return AB[ha(q)]+hp(q);}
 
 B ip(Q q){return q&&!(7&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
-B itp(Q q){Q* ptr=(Q*)q; return ip(q) && TH<=ptr && ptr<TH+THC; }         // Is this Q a pointer to the bump allocated region?
+B itp(Q q){return ip(q) && ha(q)==0;}             // Is this Q a pointer to the bump allocated region?
 Q d(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
-B*p(Q q){return (B*)(((Q*)q)+6);}                                               // pointers need no manipulation, low bits==0 is the signal for a pointer.
+B*p(Q q){return (B*)(ptr(q)+6);}                                               // pointers need no manipulation, low bits==0 is the signal for a pointer.
 B v(Q q){return q>>5;}                                                        // verbs are grammatical type, subtype 0. payload in high 59 bits
 B a(Q q){return q>>5;}
 B c(Q q){return q>>5;}                                                        // controls are grammatical type, subtype 2. payload in high 59 bits
@@ -35,21 +38,21 @@ Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):ac(q);} 
 
 B ia(Q q){return !ip(q);}                                                     // is atom  from pointer
 B t(Q q){
-  if(!ia(q))return ((Q*)q)[0];
+  if(!ia(q))return ptr(q)[0];
   B tag=q&7;
   if(tag==2)return q&31;
   return tag;
 }
-B sh(Q q){return ia(q)?0:((Q*)q)[1];}                                           // shape    from header
-B ls(Q q){return ia(q)?3:((Q*)q)[2];}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
+B sh(Q q){return ia(q)?0:ptr(q)[1];}                                           // shape    from header
+B ls(Q q){return ia(q)?3:ptr(q)[2];}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
 B sz(Q q){return 1<<ls(q);}                                                     // bytesz   from logeltsz
-D rc(Q q){return !q?0:ia(q)?1:((Q*)q)[3];}                                      // refcnt   from header
-D n(Q a){B s=sh(a);return 0==s?1:((Q*)a)[4];}                                   // length   from header
-D cp(Q a){B s=sh(a);return 0==s?1:((Q*)a)[5];}                                  // capacity from header
+D rc(Q q){return !q?0:ia(q)?1:ptr(q)[3];}                                      // refcnt   from header
+D n(Q a){B s=sh(a);return 0==s?1:ptr(a)[4];}                                   // length   from header
+D cp(Q a){B s=sh(a);return 0==s?1:ptr(a)[5];}                                  // capacity from header
 
 void ir(Q q);void dr(Q q); 
 
-Q qbz(Q bz){return (bz+sizeof(Q)-1)/sizeof(Q);}                                 // forward declare refcount helpers
+Q qbz(Q bz){return ((bz+15)/16)*2;}                                             // forward declare refcount helpers
 Q hz(){return sizeof(Q)*6;}                                                     // header size
 D cn(B t,B s,D n){                                                              // capacity from type,shape,n
   if(0==s){return 1;}                                                           // heap allocated atom. there is only one element.
@@ -61,35 +64,46 @@ D cn(B t,B s,D n){                                                              
 } 
 Q pz(B z,D c){ return (1<<z)*c;}                                           // payload size in bytes by shape, log elt size, and capacity
 void ah(Q* h,B t,B s,B z,D r,D n,D c){h[0]=t;h[1]=s;h[2]=z;h[3]=r;h[4]=n;h[5]=c;} // allocate the header. 
-Q tsni(B t,B s,B z,D n,D c,B g){                                                    // LATER: custom allocator. Q points at header
+D lsz(Q x){
+#if defined(_MSC_VER)
+  unsigned long i; _BitScanReverse64(&i,x-1); return i+1;
+#else
+  return 64-__builtin_clzll(x-1);
+#endif
+}
+Q tsni(B t,B s,B z,D n,D c,B a){                                                    // LATER: custom allocator. Q points at header
   Q p=pz(z,c);Q qz=hz()+p;
-  Q*o;if(g){o=malloc(qz);}else{if(THC<THI+qbz(qz)){printf("oom\n");exit(0);};o=(Q*)(TH+THI);THI+=qbz(qz);}
+  D sz=qbz(qz);
+  if(AI[a]+sz>AC[a]){printf("oom\n");exit(0);}
+  Q off=AI[a];
+  Q*o=AB[a]+off;AI[a]+=sz;
+  Q h=(off<<11)|(a<<8)|((lsz(qz)-4)<<3);                                            // LATER: remember to remap this size to other allocator sizes when the data moves from arena to arena.
   ah(o,t,s,z,0,n,c);
   memset((void*)(o+6),0,p);
-  return (Q)o;
+  return h;
 }
 Q tsng(B t,B s,B z,D n){return tsni(t,s,z,n,cn(t,s,n),1);}
 Q tsn(B t,B s,B z,D n){return tsni(t,s,z,n,cn(t,s,n),0);}
 Q vn(B t,B z,D n){return tsn(t,1,z,n);}
 Q ln(D n){return vn(0,3,n);}
-Q vc(B t,B z,D c,B g){return tsni(t,1,z,0,c,g);}
-Q lc(D c,B g){return vc(0,3,c,g);}
+Q vc(B t,B z,D c,B a){return tsni(t,1,z,0,c,a);}
+Q lc(D c,B a){return vc(0,3,c,a);}
 
 void pr(Q q);
 void zid(Q q,D i,Q d);
-Q dni(B t,B z,D n,B g){                                                              // alloc a dictionary of a certain type and element size with hash table capacity n. 
+Q dni(B t,B z,D n,B a){                                                              // alloc a dictionary of a certain type and element size with hash table capacity n. 
   D c=cn(5,1,n);
-  Q h=vc(5,2,c,g);                                                  // n means keycount for hash.
-  Q k=lc(c,g);
-  Q v=vc(t,z,c,g);
-  Q d=tsni(0,2,3,3,3,g);
+  Q h=vc(5,2,c,a);                                                                    // n means keycount for hash.
+  Q k=lc(c,a);
+  Q v=vc(t,z,c,a);
+  Q d=tsni(0,2,3,3,3,a);
   zid(d,0,h);zid(d,1,k);zid(d,2,v);
   return d;
 }
 Q dn(B t,B z,D n){return dni(t,z,n,0);}
 
 // varwidth getters
-Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                          // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
+Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                                // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}              
 Q ri(Q q,D i){
   if(1==sh(q)){return pi(q,i);}
@@ -116,7 +130,7 @@ Q ra(Q q){                                                                      
 Q grow(Q q,D n,D c,D m){printf("growing\n");return ac(5);}                                          // not yet implemented but, given a q, old length n, old capacity c, and amount of new items to add, extend the allocation to a new c, set the proper n.
 D xn(Q q,D m){                                                                  // if n(q)+m<c then set n to n+m otherwise grow
   D nq=n(q);D c=cp(q);
-  if(nq+m<c){((Q*)q)[4]=nq+m;}else{grow(q,nq,c,m);}
+  if(nq+m<c){ptr(q)[4]=nq+m;}else{grow(q,nq,c,m);}
   return nq+m;
 }
 // varwidth setters
@@ -191,23 +205,23 @@ Q dkv(Q d,Q k,Q v){
   xn(htq,1);                                                                  // n means element count for hash                          
   return v;
 }
-void ir(Q q){ if(ip(q)&&!itp(q)){((Q*)q)[3]++;} else if(itp(q)){dr(q);}return;}
+void ir(Q q){ if(ip(q)){ptr(q)[3]++;}return;}
 void dr(Q q){ 
-  if(!q || ia(q) || itp(q)){return;}                                          // if null or atom just return
-  if(0< --((Q*)q)[3]){return;}                                                // if there is a nonzero refcount return
+  if(!q || ia(q)){return;}                                                    // if null or atom just return
+  if(0< --ptr(q)[3]){return;}                                                 // if there is a nonzero refcount return
   if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                              // this object has refcount==0. if type 0, recurse on children
-  free((void*)q);                                                             // then free this q
+  //free((void*)q);         LATER: put a hook that frees here, dependent on arena's allocator.                                                    // then free this q
   return;                                                                     // should I consider returning a control sentinel here (type)
 }
 Q t2g(Q q){
   if(!itp(q)){return q;};
-  Q *h=((Q*)q);Q g=tsng(h[0],h[1],h[2],h[4]); // copy header, ignore refcount and capacity
+  Q *h=ptr(q);Q g=tsng(h[0],h[1],h[2],h[4]); // copy header, ignore refcount and capacity
   if(1==sh(q)){
     if(t(q)){memcpy(p(g),p(q),(1<<h[2])*h[4]);return g;}
     for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};zid(g,i,v);}
   }
   if(2==sh(q)){
-    zid(g,0,t2g(pi(q,0))); // copy hashfrom // copy hash
+    zid(g,0,t2g(pi(q,0))); // copy hash
     zid(g,1,t2g(pi(q,1))); // copy keys
     zid(g,2,t2g(pi(q,2))); // copy values
   }
@@ -246,7 +260,7 @@ void pr(Q q){
     if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld",pi(q,i));if(i<n(q)-1){printf(" ");}}} else {printf("!0");}}
   }
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
-  if(5==t(q)){printf("hash table: ");for(D i=0;i<((Q*)q)[5];i++){printf("%d:%d ",i,pi(q,i));}printf("\n");}
+  if(5==t(q)){printf("hash table: ");for(D i=0;i<cp(q);i++){printf("%d:%lld ",i,pi(q,i));}printf("\n");}
   if(7==t(q)){printf("`");pr_b(d(q),62);}
 }
 DV VD[9];
@@ -337,7 +351,7 @@ Q ca(Q a,Q w){
 
 DV VD[9]={0,0,0,at,0,pl,ml,0,ca};
 MV VM[9]={0,nt,tl,tp,ct,0,car,id,en};
-C* VT=" ~!@#+*:,";
+C* VT=" ~!@#+*:,";  // later: (logical:min,max,equal,lesser,greater,not),(bitwise:and,or,xor,bnot)
 
 Q Ap(Q a){Q p=tsn(4,1,3,1);pid(p,0,a);return p;}
 Q e(Q* q);
@@ -462,7 +476,13 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
 
 C buffer[100];
 D main(void){
-  TH=(Q*)malloc(1<<16);THC=(1<<16)/sizeof(Q);
+#if defined(_MSC_VER)
+  AB[0]=(Q*)_aligned_malloc(1<<16, 16);AC[0]=(1<<16)/8;AI[0]=0;
+  AB[1]=(Q*)_aligned_malloc(1<<24, 16);AC[1]=(1<<24)/8;AI[1]=0;
+#else
+  AB[0]=(Q*)aligned_alloc(16, 1<<16);AC[0]=(1<<16)/8;AI[0]=0;
+  AB[1]=(Q*)aligned_alloc(16, 1<<24);AC[1]=(1<<24)/8;AI[1]=0;
+#endif
   G=dni(0,3,0,1); // global dictionary
   SC[0]=dni(0,3,0,0); SP=0;
   while (1) {
@@ -474,7 +494,7 @@ D main(void){
         Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
         dkv(G,t2g(gk),t2g(gv));
       }
-      THI=0;SC[0]=dni(0,3,0,0); SP=0; 
+      AI[0]=0;SC[0]=dni(0,3,0,0); SP=0; 
      } // reset THI only if evaluation takes us back to the global scope. 
     Q r=E(lx(buffer),'\0');
     pr(r);printf("\n");

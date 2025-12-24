@@ -24,6 +24,7 @@ typedef Q(*MV)(Q);                                                            //
 
 #define ARENA_SZ       (1ULL<<32)
 Q* AB[8];Q AI[8];Q AC[8];
+Q AM[8];
 Q AQ[8]={BUMP_UNIT_QS,BUDDY_UNIT_QS,0,0,0,0,0,0};
 Q BF[32];
 B ha(Q q){return (q>>8)&7;}
@@ -110,9 +111,24 @@ static inline B buddy_order_from_units(Q units){
 static inline Q buddy_units_from_order(B ord){
   return 1ULL << ord;
 }
+static inline void commit_range(void* p, Q bytes){
+#if defined(_MSC_VER)
+  VirtualAlloc(p, bytes, MEM_COMMIT, PAGE_READWRITE);
+#else
+  Q a=(Q)p, m=4095;
+  Q s=a&~m;
+  Q e=(a+bytes+m)&~m;
+  mprotect((void*)s, e-s, PROT_READ|PROT_WRITE);
+#endif
+}
 Q bumpalloc(B t,B s,B z,D n,D c,B a){                                                    // LATER: custom allocator. Q points at header
   Q units=bump_units(z,c);
   if(AI[0]+units>AC[0]){printf("oom\n");exit(0);}
+  if(AI[0]+units>AM[0]){
+    Q req=AI[0]+units;
+    commit_range(AB[0]+AM[0]*BUMP_UNIT_QS, (req-AM[0])*BUMP_UNIT_BYTES);
+    AM[0]=req;
+  }
   Q off=AI[0];
   Q* o=AB[0]+off*BUMP_UNIT_QS;
   AI[0]+=units;
@@ -132,6 +148,7 @@ void buddyinit(B a){
 
     Q u = buddy_units_from_order(ord);
     printf("rem ord u %lld %d %lld\n",rem,ord,u);
+    commit_range(AB[a] + off * BUDDY_UNIT_QS, sizeof(Q));
     *(Q*)(AB[a] + off * BUDDY_UNIT_QS) = BF[ord];
     BF[ord] = off;
 
@@ -140,7 +157,7 @@ void buddyinit(B a){
   }
 }
 Q buddyalloc(B t,B s,B z,D n,D c,B a){
-Q units = buddy_units(z,c);
+  Q units = buddy_units(z,c);
   B ord   = buddy_order_from_units(units);
 
   B i = ord;
@@ -155,11 +172,13 @@ Q units = buddy_units(z,c);
     Q u = buddy_units_from_order(i);
     Q b = off + u;
 
+    commit_range(AB[1] + b * BUDDY_UNIT_QS, sizeof(Q));
     *(Q*)(AB[1] + b * BUDDY_UNIT_QS) = BF[i];
     BF[i] = b;
   }
 
   Q* o = AB[1] + off * BUDDY_UNIT_QS;
+  commit_range(o, az(z,c));
   ah(o,t,s,z,0,n,c);
   memset(o+6, 0, pz(z,c));
 
@@ -582,11 +601,11 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
 C buffer[100];
 D main(void){
 #if defined(_MSC_VER)
-  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
-  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){printf("VA 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
+  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
+  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){printf("VA 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #else
-  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);if(AB[0]==MAP_FAILED){printf("mmap 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
-  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);if(AB[1]==MAP_FAILED){printf("mmap 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
+  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){printf("mmap 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
+  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){printf("mmap 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #endif
   printf("AB[0] AC[0] AI[0] %lld %lld %lld\n",AB[0],AC[0],AI[0]);
   printf("AB[1] AC[1] AI[1] %lld %lld %lld\n",AB[1],AC[1],AI[1]);

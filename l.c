@@ -353,7 +353,7 @@ Q t2g(Q q){
   return g;
 }
 
-C* VT;
+C* VT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 void pr_b(Q q,D b){if(q<b){printf("%c",MAP[q]);return;}pr_b(q/b,b);printf("%c",MAP[q%b]);}
@@ -376,7 +376,7 @@ void pr(Q q){
    
   }
   if(1==t(q)){pr_b(d(q),62);}
-  if(2==t(q)){printf("%c",VT[v(q)]);}
+  if(2==t(q)){printf("%s",VT[v(q)]);}
   if(10==t(q)){printf("adverb: %c\n",a(q));}
   if(18==t(q)){printf("control: %d\n",c(q));}
   if(3==t(q)){
@@ -387,8 +387,8 @@ void pr(Q q){
   if(5==t(q)){printf("hash table: ");for(D i=0;i<cp(q);i++){printf("%d:%lld ",i,pi(q,i));}printf("\n");}
   if(7==t(q)){printf("`");pr_b(d(q),62);}
 }
-DV VD[9];
-MV VM[9];
+DV VD[32];
+MV VM[32];
 
 Q id(Q w){return w;}
 Q en(Q w){B aw=ia(w);Q z=vn(aw?t(w):0,ls(w),1);if(aw){pid(z,0,d(w));}else{zid(z,0,w);};return z;}
@@ -415,12 +415,17 @@ Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=
 
 Q car(Q w){return 0==sh(w)?w:qi(w,0);}
 
+Q math_m(Q w,MV op){
+  if(0==sh(w)){return an(op(d(w)));}
+  Q z=vn(t(w),ls(w),n(w));
+  for(D i=0;i<n(w);i++){pid(z,i,op(ri(w,i)));}
+  return z;
+}
+Q nt_aa(Q w){return !w;}
 Q nt(Q w){
   Q z=vb(0,w,nt,0,MB);
   if(18!=t(z)){return z;}if(c(z)){return z;} // if data is returned, return the data. if a control sentinel is returned and its payload is nonzero then return, otherwise listen to theh control signal to do the proper work.
-  if(ia(w)){return an(!d(w));}
-  if(1==sh(w)){z=vn(3,ls(w),n(w));for(D i=0;i<n(w);i++){pid(z,i,!pi(w,i));};return z;}
-  return ac(1); // return shape error
+  return math_m(w,nt_aa);
 }
 
 Q tl(Q w){
@@ -459,6 +464,29 @@ Q pl_aa(Q a,Q w){ return a+w;}
 Q ml_aa(Q a,Q w){ return a*w;}
 Q pl(Q a,Q w){Q z=vb(a,w,0,pl,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
 Q ml(Q a,Q w){Q z=vb(a,w,0,ml,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
+Q mn_aa(Q a,Q w){return a<w?a:w;}
+Q mx_aa(Q a,Q w){return a>w?a:w;}
+Q eq_aa(Q a,Q w){return a==w;}
+Q lt_aa(Q a,Q w){return a<w;}
+Q gt_aa(Q a,Q w){return a>w;}
+Q an_aa(Q a,Q w){return a&w;}
+Q or_aa(Q a,Q w){return a|w;}
+Q xr_aa(Q a,Q w){return a^w;}
+Q bn_aa(Q w){return ~w;}
+Q sb_aa(Q a,Q w){return a-w;}
+Q ng_aa(Q w){return -w;}
+
+Q mn(Q a,Q w){Q z=vb(a,w,0,mn,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,mn_aa);}
+Q mx(Q a,Q w){Q z=vb(a,w,0,mx,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,mx_aa);}
+Q eq(Q a,Q w){Q z=vb(a,w,0,eq,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,eq_aa);}
+Q lt(Q a,Q w){Q z=vb(a,w,0,lt,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,lt_aa);}
+Q gt(Q a,Q w){Q z=vb(a,w,0,gt,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,gt_aa);}
+Q an_op(Q a,Q w){Q z=vb(a,w,0,an_op,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,an_aa);}
+Q or_op(Q a,Q w){Q z=vb(a,w,0,or_op,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,or_aa);}
+Q xr(Q a,Q w){Q z=vb(a,w,0,xr,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,xr_aa);}
+Q bn(Q w){Q z=vb(0,w,bn,0,MB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math_m(w,bn_aa);}
+Q sb(Q a,Q w){Q z=vb(a,w,0,sb,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,sb_aa);}
+Q ng(Q w){Q z=vb(0,w,ng,0,MB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math_m(w,ng_aa);}
 
 Q set(Q a,Q w,D sp){
   dkv(SC[sp],a,w);
@@ -473,9 +501,9 @@ Q ca(Q a,Q w){
   return z;
 }
 
-DV VD[9]={0,0,0,at,0,pl,ml,0,ca};
-MV VM[9]={0,nt,tl,tp,ct,0,car,id,en};
-C* VT=" ~!@#+*:,";  // later: (logical:min,max,equal,lesser,greater,not),(bitwise:and,or,xor,bnot)
+DV VD[32]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,an_op,or_op,0,sb};
+MV VM[32]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng};
+C* VT[]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-"};
 
 Q Ap(Q a){Q p=tsn(4,1,3,1);pid(p,0,a);return p;}
 Q e(Q* q);
@@ -549,8 +577,14 @@ Q e(Q* q){
          a             ;                                       //  otherwise this must be data, return the data.
 }
 
-Q R(C a){return ('a'<=a&&a<='z')?ar(a-'a'):0;} 
-Q V(C a){for(D i=0;i<strlen(VT);i++){if(VT[i]==a){return av(i);}}return 0;}
+Q R(C a){return ('a'<=a&&a<='z')?ar(a-'a'):0;}
+D FV(C* s){
+  for(D i=0;i<sizeof(VT)/sizeof(VT[0]);i++){
+    if(strcmp(VT[i],s)==0) return i;
+  }
+  return 0;
+}
+Q V(C c){C s[2]={c,0};D i=FV(s);return i?av(i):0;}
 Q parse_b(C* s, D len, D base){
   Q r=0,p=1;
   for(D i=len-1;i<len;i--){
@@ -563,7 +597,7 @@ Q parse_b(C* s, D len, D base){
 // CClass(cc):0-nul,1-spc,2-alp,3-dig,4-dot,5-qot,6-bqt,7-ver,8-ctl,9-adv,10-oth,11-neg
 // Character class lookup table. Maps ASCII chars ' ' (32) to '~' (126) to a class index.
 //              !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
-static C* CST="1757AAA988777B49333333333378AAAA722222222222222222222222222898AA6222222222222222222222222228A87";
+static C* CST="1757AA7988777B49333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
 D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
 Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
   D TT[7][12]={ // Transition Table
@@ -579,7 +613,7 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
   while(st!=7){
     C*s=p;D cc=cl(*p);st=TT[0][cc]; // s:token start
     if(st==0){p++;continue;} // whitespace
-    if(cc>=7&&cc<=9){q[qi++]=cc==7?V(*p):cc==8?ac(*p):aa(*p);p++;st=0;continue;} // verbs, controls, adverbs
+    if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(*p);p++;st=0;continue;} // verbs, controls, adverbs
     while(st!=7){
       p++;cc=cl(*p);D next_st=TT[st][cc];
       if(st==1&&next_st!=2){q[qi++]=V(*s);p=s+1;st=0;break;} // not a number, treat '-' as a verb
@@ -587,7 +621,10 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
         D len=p-s;C t[100];strncpy(t,s,len);t[len]='\0';
         if(st==1||st==2) q[qi++]=an(parse_b(t,len,10));
         else if(st==3)  q[qi++]=an(parse_b(t,len,10)); // TODO: float support
-        else if(st==4)  q[qi++]=ar(parse_b(t,len,62));
+        else if(st==4){
+          D vi=FV(t);
+          if(vi) q[qi++]=av(vi); else q[qi++]=ar(parse_b(t,len,62));
+        }
         else if(st==6){ s++; len--; strncpy(t,s,len);t[len]='\0'; q[qi++]=as(parse_b(t,len,62));}
         // TODO: S_STR, S_FLT
         st=0;break;
@@ -607,8 +644,8 @@ D main(void){
   AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){printf("mmap 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
   AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){printf("mmap 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #endif
-  printf("AB[0] AC[0] AI[0] %lld %lld %lld\n",AB[0],AC[0],AI[0]);
-  printf("AB[1] AC[1] AI[1] %lld %lld %lld\n",AB[1],AC[1],AI[1]);
+  printf("AB[0] AC[0] AI[0] %lld %lld %lld\n",(long long)AB[0],AC[0],AI[0]);
+  printf("AB[1] AC[1] AI[1] %lld %lld %lld\n",(long long)AB[1],AC[1],AI[1]);
   buddyinit(1);
   G=dni(0,3,0,1); // global dictionary
   SC[0]=dni(0,3,0,0); SP=0;

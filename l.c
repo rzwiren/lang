@@ -6,6 +6,9 @@
 #if defined(_MSC_VER)
   #include <intrin.h>
   #include <malloc.h>
+  #include <windows.h>
+#else
+  #include <sys/mman.h>
 #endif
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
@@ -13,15 +16,24 @@ typedef long long J; typedef int I; typedef short H;
 typedef Q(*DV)(Q,Q);                                                          // function pointer for dyadic verb
 typedef Q(*MV)(Q);                                                            // function pointer for monadic verb
 
+#define BUMP_UNIT_BYTES   16
+#define BUDDY_UNIT_BYTES  4096
+
+#define BUMP_UNIT_QS   (BUMP_UNIT_BYTES / sizeof(Q))
+#define BUDDY_UNIT_QS  (BUDDY_UNIT_BYTES / sizeof(Q))
+
+#define ARENA_SZ       (1ULL<<32)
 Q* AB[8];Q AI[8];Q AC[8];
+Q AQ[8]={BUMP_UNIT_QS,BUDDY_UNIT_QS,0,0,0,0,0,0};
+Q BF[32];
 B ha(Q q){return (q>>8)&7;}
 Q hp(Q q){return q>>11;}
-Q* ptr(Q q){return AB[ha(q)]+hp(q);}
+Q* ptr(Q q){return AB[ha(q)]+(hp(q)*AQ[ha(q)]);}
 
 B ip(Q q){return q&&!(7&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
-B itp(Q q){return ip(q) && ha(q)==0;}             // Is this Q a pointer to the bump allocated region?
+B itp(Q q){return ip(q) && ha(q)==0;}                                         // Is this Q a pointer to the bump allocated region?
 Q d(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
-B*p(Q q){return (B*)(ptr(q)+6);}                                               // pointers need no manipulation, low bits==0 is the signal for a pointer.
+B*p(Q q){return (B*)(ptr(q)+6);}                                              // pointers point at header after decoding and need to be adjusted to point at the data
 B v(Q q){return q>>5;}                                                        // verbs are grammatical type, subtype 0. payload in high 59 bits
 B a(Q q){return q>>5;}
 B c(Q q){return q>>5;}                                                        // controls are grammatical type, subtype 2. payload in high 59 bits
@@ -63,6 +75,7 @@ D cn(B t,B s,D n){                                                              
   return n+(n>>1)+(n>>3);                                                       // n+n/2+n/8 to approximate 1.618 LATER: overflow fix
 } 
 Q pz(B z,D c){ return (1<<z)*c;}                                           // payload size in bytes by shape, log elt size, and capacity
+Q az(B z,D c){ return hz()+pz(z,c);}                                       // allocation size
 void ah(Q* h,B t,B s,B z,D r,D n,D c){h[0]=t;h[1]=s;h[2]=z;h[3]=r;h[4]=n;h[5]=c;} // allocate the header. 
 D lsz(Q x){
 #if defined(_MSC_VER)
@@ -71,22 +84,113 @@ D lsz(Q x){
   return 64-__builtin_clzll(x-1);
 #endif
 }
-Q tsni(B t,B s,B z,D n,D c,B a){                                                    // LATER: custom allocator. Q points at header
-  Q p=pz(z,c);Q qz=hz()+p;
-  D sz=qbz(qz);
-  if(AI[a]+sz>AC[a]){printf("oom\n");exit(0);}
-  Q off=AI[a];
-  Q*o=AB[a]+off;AI[a]+=sz;
-  Q h=(off<<11)|(a<<8)|((lsz(qz)-4)<<3);                                            // LATER: remember to remap this size to other allocator sizes when the data moves from arena to arena.
-  ah(o,t,s,z,0,n,c);
-  memset((void*)(o+6),0,p);
-  return h;
+static inline B floor_ord(Q x){
+  // x >= 1
+#if defined(_MSC_VER)
+  unsigned long i;
+  _BitScanReverse64(&i, x);
+  return (B)i;
+#else
+  return (B)(63 - __builtin_clzll(x));
+#endif
 }
-Q tsng(B t,B s,B z,D n){return tsni(t,s,z,n,cn(t,s,n),1);}
-Q tsn(B t,B s,B z,D n){return tsni(t,s,z,n,cn(t,s,n),0);}
+static inline Q bump_units(B z, D c){
+  Q bytes = hz() + pz(z,c);
+  return (bytes + BUMP_UNIT_BYTES - 1) / BUMP_UNIT_BYTES;
+}
+static inline Q buddy_units(B z, D c){
+  Q bytes = hz() + pz(z,c);
+  return (bytes + BUDDY_UNIT_BYTES - 1) / BUDDY_UNIT_BYTES;
+}
+static inline B buddy_order_from_units(Q units){
+  // monotone mapping, not semantically log2
+  return floor_ord(units);
+}
+
+static inline Q buddy_units_from_order(B ord){
+  return 1ULL << ord;
+}
+Q bumpalloc(B t,B s,B z,D n,D c,B a){                                                    // LATER: custom allocator. Q points at header
+  Q units=bump_units(z,c);
+  if(AI[0]+units>AC[0]){printf("oom\n");exit(0);}
+  Q off=AI[0];
+  Q* o=AB[0]+off*BUMP_UNIT_QS;
+  AI[0]+=units;
+  ah(o,t,s,z,0,n,c);
+  memset(o+6,0,pz(z,c));
+  return (off<<11)|(0<<8);
+}
+void bumpfree(B a){AI[a]=0;}
+void buddyinit(B a){
+  for(D i=0;i<32;i++) BF[i]=~0ULL;
+
+  Q off=0;
+  Q rem=AC[a];               // units remaining
+  while(rem){
+    B ord = floor_ord(rem);
+    if(ord>=32) ord=31;
+
+    Q u = buddy_units_from_order(ord);
+    printf("rem ord u %lld %d %lld\n",rem,ord,u);
+    *(Q*)(AB[a] + off * BUDDY_UNIT_QS) = BF[ord];
+    BF[ord] = off;
+
+    off += u;
+    rem -= u;
+  }
+}
+Q buddyalloc(B t,B s,B z,D n,D c,B a){
+Q units = buddy_units(z,c);
+  B ord   = buddy_order_from_units(units);
+
+  B i = ord;
+  while(i<32 && BF[i]==~0ULL) i++;
+  if(i==32){ printf("oom buddy\n"); exit(0); }
+
+  Q off = BF[i];
+  BF[i] = *(Q*)(AB[1] + off * BUDDY_UNIT_QS);
+
+  while(i>ord){
+    i--;
+    Q u = buddy_units_from_order(i);
+    Q b = off + u;
+
+    *(Q*)(AB[1] + b * BUDDY_UNIT_QS) = BF[i];
+    BF[i] = b;
+  }
+
+  Q* o = AB[1] + off * BUDDY_UNIT_QS;
+  ah(o,t,s,z,0,n,c);
+  memset(o+6, 0, pz(z,c));
+
+  return (off << 11) | (1 << 8) | (ord << 3);
+}
+void buddyfree(Q q){
+  B a   = ha(q);
+  Q off = hp(q);
+  B ord = (q>>3)&31;
+  while(ord<31){
+    Q u = buddy_units_from_order(ord);
+    Q b = off ^ u;
+    Q* prev = &BF[ord];
+    Q cur = *prev;
+    while(cur!=~0ULL && cur!=b){
+      prev = (Q*)(AB[a] + cur * BUDDY_UNIT_QS);
+      cur = *prev;
+    }
+    if(cur!=b) break;
+    *prev = *(Q*)(AB[a] + cur * BUDDY_UNIT_QS);
+    if(b<off) off=b;
+    ord++;
+  }
+  *(Q*)(AB[a] + off * BUDDY_UNIT_QS) = BF[ord];
+  BF[ord] = off;
+}
+Q tsng(B t,B s,B z,D n){return buddyalloc(t,s,z,n,cn(t,s,n),1);}
+Q tsn(B t,B s,B z,D n){return bumpalloc(t,s,z,n,cn(t,s,n),0);}
 Q vn(B t,B z,D n){return tsn(t,1,z,n);}
 Q ln(D n){return vn(0,3,n);}
-Q vc(B t,B z,D c,B a){return tsni(t,1,z,0,c,a);}
+Q vc(B t,B z,D c,B a){return (a==1?buddyalloc:bumpalloc)(t,1,z,0,c,a);}
 Q lc(D c,B a){return vc(0,3,c,a);}
 
 void pr(Q q);
@@ -96,7 +200,7 @@ Q dni(B t,B z,D n,B a){                                                         
   Q h=vc(5,2,c,a);                                                                    // n means keycount for hash.
   Q k=lc(c,a);
   Q v=vc(t,z,c,a);
-  Q d=tsni(0,2,3,3,3,a);
+  Q d=(a==1?buddyalloc:bumpalloc)(0,2,3,3,3,a);
   zid(d,0,h);zid(d,1,k);zid(d,2,v);
   return d;
 }
@@ -130,6 +234,7 @@ Q ra(Q q){                                                                      
 Q grow(Q q,D n,D c,D m){printf("growing\n");return ac(5);}                                          // not yet implemented but, given a q, old length n, old capacity c, and amount of new items to add, extend the allocation to a new c, set the proper n.
 D xn(Q q,D m){                                                                  // if n(q)+m<c then set n to n+m otherwise grow
   D nq=n(q);D c=cp(q);
+  printf("q t(q) nq m c %lld %d %d %d %d\n",q,t(q),nq,m,c);
   if(nq+m<c){ptr(q)[4]=nq+m;}else{grow(q,nq,c,m);}
   return nq+m;
 }
@@ -173,15 +278,15 @@ Q dki(Q d, Q k){                                                                
   return e?qi(vq,e-1):0;                                                        // Found, or empty slot
 }
 
-Q dk(Q d, Q k){ // outer "dictionary key" lookup with scope traversal
+Q dk(Q d, Q k){                                                                 // outer "dictionary key" lookup with scope traversal
   Q r=dki(d,k);if(r){return r;}
-  for (I j=SP; j>=0; j--) {  // Search from the current scope (SP) down to scope 0
+  for (I j=SP; j>=0; j--) {                                                     // Search from the current scope (SP) down to scope 0
     Q r = dki(SC[j], k);
     if(r){return r;}
   }
-  r=dki(G, k);  // If not found in scopes, try the global dictionary G
+  r=dki(G, k);                                                                  // If not found in scopes, try the global dictionary G
   if(r){return r;}
-  return ac(4); // Return result from G or "not found"
+  return ac(4);                                                                 // Return result from G or "not found"
 }
 Q dkv(Q d,Q k,Q v){
   Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
@@ -210,7 +315,7 @@ void dr(Q q){
   if(!q || ia(q)){return;}                                                    // if null or atom just return
   if(0< --ptr(q)[3]){return;}                                                 // if there is a nonzero refcount return
   if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                              // this object has refcount==0. if type 0, recurse on children
-  //free((void*)q);         LATER: put a hook that frees here, dependent on arena's allocator.                                                    // then free this q
+  if(1==ha(q))buddyfree(q);                                                   // then free this q
   return;                                                                     // should I consider returning a control sentinel here (type)
 }
 Q t2g(Q q){
@@ -477,12 +582,15 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
 C buffer[100];
 D main(void){
 #if defined(_MSC_VER)
-  AB[0]=(Q*)_aligned_malloc(1<<16, 16);AC[0]=(1<<16)/8;AI[0]=0;
-  AB[1]=(Q*)_aligned_malloc(1<<24, 16);AC[1]=(1<<24)/8;AI[1]=0;
+  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
+  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){printf("VA 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #else
-  AB[0]=(Q*)aligned_alloc(16, 1<<16);AC[0]=(1<<16)/8;AI[0]=0;
-  AB[1]=(Q*)aligned_alloc(16, 1<<24);AC[1]=(1<<24)/8;AI[1]=0;
+  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);if(AB[0]==MAP_FAILED){printf("mmap 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
+  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);if(AB[1]==MAP_FAILED){printf("mmap 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #endif
+  printf("AB[0] AC[0] AI[0] %lld %lld %lld\n",AB[0],AC[0],AI[0]);
+  printf("AB[1] AC[1] AI[1] %lld %lld %lld\n",AB[1],AC[1],AI[1]);
+  buddyinit(1);
   G=dni(0,3,0,1); // global dictionary
   SC[0]=dni(0,3,0,0); SP=0;
   while (1) {

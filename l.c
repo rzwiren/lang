@@ -43,7 +43,7 @@ Q ar(Q r){return (r<<3)|1;}                                                   //
 Q av(Q v){return (v<<5)|2;}                                                   // create a verb atom (grammatical type 2, subtype 0)
 Q aa(Q a){return (a<<5)|(1<<3)|2;}                                            // create an adverb atom (grammatical type 2, subtype 1)
 Q ac(Q c){return (c<<5)|(2<<3)|2;}                                            // create a control atom (grammatical type 2, subtype 2)
-Q an(Q n){return (n<(1ULL<<61))?((n<<3)|3):(0|3);}                            // create an atom of type 3 (integer) TODO: heap allocated 64 bit int. return 3 as a tagged 0 for stuff that should really be allocated on heap. 
+Q an(Q n){return (n<(1ULL<<61))?((n<<3)|3):(0|3);}                            // create an atom of type 3 (integer) TODO: heap allocated 64 bit int. return 3 as a tagged 0 for stuff that should really be allocated on heap. bitnot is broken on atoms due to this. 
 Q ap(Q v){return (v<<3)|4;}                                                   // create an atom of type 4 (partial eval) - HEAP ONLY
                                                                               // type 5 is hash
 Q as(Q s){return (s<<3)|7;}                                                   // create an atom of type 7 (symbol)
@@ -58,7 +58,7 @@ B t(Q q){
 }
 B sh(Q q){return ia(q)?0:ptr(q)[1];}                                           // shape    from header
 B ls(Q q){return ia(q)?3:ptr(q)[2];}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
-B sz(Q q){return 1<<ls(q);}                                                     // bytesz   from logeltsz
+B sz(Q q){return 1<<ls(q);}                                                    // bytesz   from logeltsz
 D rc(Q q){return !q?0:ia(q)?1:ptr(q)[3];}                                      // refcnt   from header
 D n(Q a){B s=sh(a);return 0==s?1:ptr(a)[4];}                                   // length   from header
 D cp(Q a){B s=sh(a);return 0==s?1:ptr(a)[5];}                                  // capacity from header
@@ -75,8 +75,8 @@ D cn(B t,B s,D n){                                                              
   if(0==n){return 1;}
   return n+(n>>1)+(n>>3);                                                       // n+n/2+n/8 to approximate 1.618 LATER: overflow fix
 } 
-Q pz(B z,D c){ return (1<<z)*c;}                                           // payload size in bytes by shape, log elt size, and capacity
-Q az(B z,D c){ return hz()+pz(z,c);}                                       // allocation size
+Q pz(B z,D c){ return (1<<z)*c;}                                                // payload size in bytes by shape, log elt size, and capacity
+Q az(B z,D c){ return hz()+pz(z,c);}                                            // allocation size
 void ah(Q* h,B t,B s,B z,D r,D n,D c){h[0]=t;h[1]=s;h[2]=z;h[3]=r;h[4]=n;h[5]=c;} // allocate the header. 
 D lsz(Q x){
 #if defined(_MSC_VER)
@@ -121,7 +121,7 @@ static inline void commit_range(void* p, Q bytes){
   mprotect((void*)s, e-s, PROT_READ|PROT_WRITE);
 #endif
 }
-Q bumpalloc(B t,B s,B z,D n,D c,B a){                                                    // LATER: custom allocator. Q points at header
+Q bumpalloc(B t,B s,B z,D n,D c,B a){                                                    
   Q units=bump_units(z,c);
   if(AI[0]+units>AC[0]){printf("oom\n");exit(0);}
   if(AI[0]+units>AM[0]){
@@ -216,7 +216,7 @@ void pr(Q q);
 void zid(Q q,D i,Q d);
 Q dni(B t,B z,D n,B a){                                                              // alloc a dictionary of a certain type and element size with hash table capacity n. 
   D c=cn(5,1,n);
-  Q h=vc(5,2,c,a);                                                                    // n means keycount for hash.
+  Q h=vc(5,2,c,a);                                                                   // n means keycount for hash.
   Q k=lc(c,a);
   Q v=vc(t,z,c,a);
   Q d=(a==1?buddyalloc:bumpalloc)(0,2,3,3,3,a);
@@ -226,12 +226,12 @@ Q dni(B t,B z,D n,B a){                                                         
 Q dn(B t,B z,D n){return dni(t,z,n,0);}
 Q dnu(B t,B z,D n){return bumpalloc(0,2,3,3,3,0);}
 // varwidth getters
-Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                                // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
+Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                               // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}              
 Q ri(Q q,D i){
   if(1==sh(q)){return pi(q,i);}
   printf("non shape 1 ri call\n");
-  return ac(1);                                                                 // shape error
+  return ac(1);                                                                       // shape error
 }
 Q vi(D n,D i){if(i>=n){return ac(2);};return an(i);}
 Q qi(Q q,D i){B s=sh(q),tq=t(q);
@@ -250,7 +250,7 @@ Q ra(Q q){                                                                      
     default: return ac(5);                                                      // not yet implemented
   }
 }
-Q grow(Q q,D n,D c,D m){printf("growing\n");return ac(5);}                                          // not yet implemented but, given a q, old length n, old capacity c, and amount of new items to add, extend the allocation to a new c, set the proper n.
+Q grow(Q q,D n,D c,D m){printf("growing\n");return ac(5);}                      // not yet implemented but, given a q, old length n, old capacity c, and amount of new items to add, extend the allocation to a new c, set the proper n.
 D xn(Q q,D m){                                                                  // if n(q)+m<c then set n to n+m otherwise grow
   D nq=n(q);D c=cp(q);
   printf("q t(q) nq m c %lld %d %d %d %d\n",q,t(q),nq,m,c);
@@ -314,7 +314,7 @@ Q dkv(Q d,Q k,Q v){
   D i=fk(ht,k,c,kq);
   if(i==c){return ac(6);}
   D e=ht[i];
-  if(e){ // overwrite existing value
+  if(e){                                                                      // overwrite existing value
     D idx=e-1;
     Q old=pi(vq, idx);
     ir(v);
@@ -339,15 +339,15 @@ void dr(Q q){
 }
 Q t2g(Q q){
   if(!itp(q)){return q;};
-  Q *h=ptr(q);Q g=tsng(h[0],h[1],h[2],h[4]); // copy header, ignore refcount and capacity
+  Q *h=ptr(q);Q g=tsng(h[0],h[1],h[2],h[4]);                                  // copy header, ignore refcount and capacity
   if(1==sh(q)){
     if(t(q)){memcpy(p(g),p(q),(1<<h[2])*h[4]);return g;}
     for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};zid(g,i,v);}
   }
   if(2==sh(q)){
-    zid(g,0,t2g(pi(q,0))); // copy hash
-    zid(g,1,t2g(pi(q,1))); // copy keys
-    zid(g,2,t2g(pi(q,2))); // copy values
+    zid(g,0,t2g(pi(q,0)));                                                    // copy hash
+    zid(g,1,t2g(pi(q,1)));                                                    // copy keys
+    zid(g,2,t2g(pi(q,2)));                                                    // copy values
   }
   
   return g;
@@ -395,7 +395,7 @@ Q en(Q w){B aw=ia(w);Q z=vn(aw?t(w):0,ls(w),1);if(aw){pid(z,0,d(w));}else{zid(z,
 Q tp(Q w){return an(t(w));}
 Q ct(Q w){return an(n(w));}
 
-typedef enum {DB,LB,RB,MB} BM; // broadcast mode
+typedef enum {DB,LB,RB,MB} BM;                                                          // broadcast mode
 Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=n(w);
   if(DB==m && na!=nw && sa && sw){return ac(2);}
   B ib=DB==m?((!ta)||(!tw)):RB==m?!tw:LB==m?!ta:/*MB==m*/!tw;
@@ -405,8 +405,7 @@ Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=
     for(D i=0;i<nz;i++){
       Q ai=1==sa?qi(a,i):2==sa?qi(pi(a,2),i):a;Q wi=1==sw?qi(w,i):2==sw?qi(pi(w,2),i):w;
       Q zi=DB==m?dv(ai,wi):RB==m?dv(a,wi):LB==m?dv(ai,w):/*MB==m*/mv(wi);
-      if(18==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
-      //zid(z,i+(2==sa?1:2==sw?1:0),zi);
+      if(18==t(zi)){return zi;}                                                         // sentinel bubbled up. later: add cleanup
       zid(z,i,zi);
     }
     if(2==sa){
@@ -415,8 +414,7 @@ Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=
       memcpy(p(hc),p(pi(a,0)),(1<<hh[2])*hh[4]);
       Q *hk=ptr(pi(a,1));Q kc=tsn(hk[0],hk[1],hk[2],hk[4]);
       memcpy(p(kc),p(pi(a,1)),(1<<hk[2])*hk[4]);
-      // memcpy hash and keys into a newly allocated Q and then use zid to set the hash and keys into zd
-      zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z); // set the values into the dict
+      zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z);
       return zd;
     }
     if(2==sw){
@@ -425,8 +423,7 @@ Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=
       memcpy(p(hc),p(pi(w,0)),(1<<hh[2])*hh[4]);
       Q *hk=ptr(pi(w,1));Q kc=tsn(hk[0],hk[1],hk[2],hk[4]);
       memcpy(p(kc),p(pi(w,1)),(1<<hk[2])*hk[4]);
-      // memcpy hash and keys into a newly allocated Q and then use zid to set the hash and keys into zd
-      zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z); // set the values into the dict
+      zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z);
       return zd;
     }
     return z;
@@ -526,16 +523,16 @@ Q Ap(Q a){Q p=tsn(4,1,3,1);pid(p,0,a);return p;}
 Q e(Q* q);
 Q E(Q* q,C tc);
 Q eoc(Q* q){
-  if(SP+1 >= 1024) return ac(6); // scope depth overflow
-  SP++;D csp=SP; // cache the SP of this new allocation, return that.
-  SC[SP] = dn(0,3,0); // Allocate new dictionary for the new scope
-  E(q+1,'}'); // Evaluate the inner expression
-  return SC[csp]; // Return the created dictionary
+  if(SP+1 >= 1024) return ac(6);                                            // scope depth overflow
+  SP++;D csp=SP;                                                            // cache the SP of this new allocation, return that.
+  SC[SP] = dn(0,3,0);                                                       // Allocate new dictionary for the new scope
+  E(q+1,'}');                                                               // Evaluate the inner expression
+  return SC[csp];                                                           // Return the created dictionary
 }
 
 Q ecc(Q* q){
   if(SP > 0) SP--;
-  return tsn(4,1,3,0); // Behave like a semicolon, terminating the expression
+  return tsn(4,1,3,0);                                                      // Behave like a semicolon, terminating the expression
 }
 
 Q emv(Q*q){
@@ -545,12 +542,11 @@ Q emv(Q*q){
 }
 
 Q edv(Q a,Q*q){
-  D current_sp = SP; // Cache the scope pointer before evaluating the right-hand side.
+  D current_sp = SP;                                                        // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q+1);B i=v(*q);
   if(4==t(w)&&(7!=i)){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,*q);return ca(p,w);}  // handle partial evaluations but allow assignment of them instantly. 
   a=((1==t(a))&&(7!=i))?dk(SC[current_sp],a):a;
-  // If this is an assignment, use the cached scope pointer to write into the correct scope.
-  if(7==i){return set(a,w,current_sp);}
+  if(7==i){return set(a,w,current_sp);}                                     // If this is an assignment, use the cached scope pointer to write into the correct scope.
   DV dv=VD[i];
   return dv(a,w);
 }
@@ -559,26 +555,24 @@ Q E(Q* q, C tc){
   Q r = 0;
   while(*q && !(18==t(*q)&&tc==c(*q))){
     r = e(q);
-    // Find the end of the evaluated expression
-    while(*q && !(18==t(*q) && c(*q)==';')) q++;
-    // If we found a semicolon, skip it to start the next expression
-    if(*q) q++;
+    while(*q && !(18==t(*q) && c(*q)==';')) q++;                            // Find the end of the evaluated expression
+    if(*q) q++;                                                             // If we found a semicolon, skip it to start the next expression
   }
   return r;
 }
 
 Q e(Q* q){
   Q a=*q;
-  if(!a){return tsn(4,1,3,0);}                                 // If a is the end of the stream then we must have missing data. return type 4
+  if(!a){return tsn(4,1,3,0);}                                  // If a is the end of the stream then we must have missing data. return type 4
   if(18==t(a) && ';'==c(a)){return tsn(4,1,3,0);}              
   if(18==t(a)){
     if('{'==c(a)) return eoc(q);                                // this creates a scope dictionary and returns it.
     if('}'==c(a)) return ecc(q);                                // this terminates a scope dictionary and behaves like a semicolon
     if(';'==c(a)) return tsn(4,1,3,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
   }
-  Q w=q[1];                                                    // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
-  B endexpr = !w || (18==t(w) && c(w)==';');         // end of expression is null or semicolon or }
-  B endscope = w && (18==t(w) && c(w)=='}');                 // end of scope is }
+  Q w=q[1];                                                     // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
+  B endexpr = !w || (18==t(w) && c(w)==';');                    // end of expression is null or semicolon or }
+  B endscope = w && (18==t(w) && c(w)=='}');                    // end of scope is }
   B end = endexpr || endscope;
   if(endscope){ecc(q);}
   return (2==t(a)&&!end)  ?                                // if a is a verb and w isn't the end of the stream

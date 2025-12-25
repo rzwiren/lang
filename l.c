@@ -224,7 +224,7 @@ Q dni(B t,B z,D n,B a){                                                         
   return d;
 }
 Q dn(B t,B z,D n){return dni(t,z,n,0);}
-
+Q dnu(B t,B z,D n){return bumpalloc(0,2,3,3,3,0);}
 // varwidth getters
 Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                                // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}              
@@ -401,12 +401,33 @@ Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=
   B ib=DB==m?((!ta)||(!tw)):RB==m?!tw:LB==m?!ta:/*MB==m*/!tw;
   if(ib){
     D nz=DB==m?(sa?na:nw):RB==m?nw:LB==m?na:nw;
-    Q z=ln(nz);
+    Q z=ln(nz+(2==sa?1:2==sw?1:0));
     for(D i=0;i<nz;i++){
-      Q ai=sa?qi(a,i):a;Q wi=sw?qi(w,i):w;
+      Q ai=1==sa?qi(a,i):2==sa?qi(pi(a,2),i):a;Q wi=1==sw?qi(w,i):2==sw?qi(pi(w,2),i):w;
       Q zi=DB==m?dv(ai,wi):RB==m?dv(a,wi):LB==m?dv(ai,w):/*MB==m*/mv(wi);
       if(18==t(zi)){return zi;} // sentinel bubbled up. later: add cleanup
+      //zid(z,i+(2==sa?1:2==sw?1:0),zi);
       zid(z,i,zi);
+    }
+    if(2==sa){
+      Q zd=dnu(0,3,0);
+      Q *hh=ptr(pi(a,0));Q hc=tsn(hh[0],hh[1],hh[2],hh[4]);
+      memcpy(p(hc),p(pi(a,0)),(1<<hh[2])*hh[4]);
+      Q *hk=ptr(pi(a,1));Q kc=tsn(hk[0],hk[1],hk[2],hk[4]);
+      memcpy(p(kc),p(pi(a,1)),(1<<hk[2])*hk[4]);
+      // memcpy hash and keys into a newly allocated Q and then use zid to set the hash and keys into zd
+      zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z); // set the values into the dict
+      return zd;
+    }
+    if(2==sw){
+      Q zd=dnu(0,3,0);
+      Q *hh=ptr(pi(w,0));Q hc=tsn(hh[0],hh[1],hh[2],hh[4]);
+      memcpy(p(hc),p(pi(w,0)),(1<<hh[2])*hh[4]);
+      Q *hk=ptr(pi(w,1));Q kc=tsn(hk[0],hk[1],hk[2],hk[4]);
+      memcpy(p(kc),p(pi(w,1)),(1<<hk[2])*hk[4]);
+      // memcpy hash and keys into a newly allocated Q and then use zid to set the hash and keys into zd
+      zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z); // set the values into the dict
+      return zd;
     }
     return z;
   }
@@ -422,11 +443,7 @@ Q math_m(Q w,MV op){
   return z;
 }
 Q nt_aa(Q w){return !w;}
-Q nt(Q w){
-  Q z=vb(0,w,nt,0,MB);
-  if(18!=t(z)){return z;}if(c(z)){return z;} // if data is returned, return the data. if a control sentinel is returned and its payload is nonzero then return, otherwise listen to theh control signal to do the proper work.
-  return math_m(w,nt_aa);
-}
+Q nt(Q w){Q z=vb(0,w,nt,0,MB);if(18!=t(z)){return z;}if(c(z)){return z;}return math_m(w,nt_aa);}
 
 Q tl(Q w){
   B aw=ia(w);if(aw){w=en(w);};D nw=n(w);Q z=ln(nw);

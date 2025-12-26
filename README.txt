@@ -65,10 +65,14 @@ This interpreter is essentially an abstract machine. It works off of a Q (quadwo
    5 - hash. never atom.
    6 - unused
    7 - symbol
-  the metadata in a Q is type dependent (p:payload,f:fileid,a:arenaid,o:order,t:typetag)
+  the metadata in a Q is type dependent (p:payload,f:fileid,a:arenaid,o:order,t:typetag). Data is organized into arenas 0-7
    0 -
-    file backed (a=7) 37p16f3a5o3t
+    file backed 
+     2 - (read only file backed snapshot) 58p3a3t
+     3 - (many small files, still needs thought) 37p16f3a5o3t
     ram backed (a in 0..6) 53p3a5o3t
+     0 - (temp allocations) 58p3a3t
+     1 - (global allocations) 53p5o3a3t
    1,3,7 - 61p3t
    2 - 59p2t3t (there are 2 more bits worth of subtypes for the grammatical types with low bits == 2)
 the arena portion of a Q is a way for the system to find the base address used to calculate the true pointer to that Q

@@ -27,9 +27,9 @@ Q* AB[8];Q AI[8];Q AC[8];
 Q AM[8];
 Q AQ[8]={BUMP_UNIT_QS,BUDDY_UNIT_QS,0,0,0,0,0,0};
 Q BF[32];
-B ha(Q q){return (q>>8)&7;}
-Q hp(Q q){return q>>11;}
-Q* ptr(Q q){return AB[ha(q)]+(hp(q)*AQ[ha(q)]);}
+B ha(Q q){return (q>>3)&7;}
+Q hp(B a,Q q){return q>>(0==a?6:1==a?11:6);}
+Q* ptr(Q q){return AB[ha(q)]+(hp(ha(q),q)*AQ[ha(q)]);}
 
 B ip(Q q){return q&&!(7&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
 B itp(Q q){return ip(q) && ha(q)==0;}                                         // Is this Q a pointer to the bump allocated region?
@@ -134,7 +134,7 @@ Q bumpalloc(B t,B s,B z,D n,D c,B a){
   AI[0]+=units;
   ah(o,t,s,z,0,n,c);
   memset(o+6,0,pz(z,c));
-  return (off<<11)|(0<<8);
+  return (off<<6)|(0<<3);
 }
 void bumpfree(B a){AI[a]=0;}
 void buddyinit(B a){
@@ -182,12 +182,12 @@ Q buddyalloc(B t,B s,B z,D n,D c,B a){
   ah(o,t,s,z,0,n,c);
   memset(o+6, 0, pz(z,c));
 
-  return (off << 11) | (1 << 8) | (ord << 3);
+  return (off << 11) | (ord << 6) | (1 << 3) ;
 }
 void buddyfree(Q q){
   B a   = ha(q);
-  Q off = hp(q);
-  B ord = (q>>3)&31;
+  Q off = hp(a,q);
+  B ord = (q>>6)&31;
   while(ord<31){
     Q u = buddy_units_from_order(ord);
     Q b = off ^ u;

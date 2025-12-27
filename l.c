@@ -13,8 +13,12 @@
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
 typedef long long J; typedef int I; typedef short H;
-typedef Q(*DV)(Q,Q);                                                          // function pointer for dyadic verb
-typedef Q(*MV)(Q);                                                            // function pointer for monadic verb
+typedef Q(*RDO)(Q,Q);                                                           // function pointer for raw dyadic operation
+typedef Q(*RMO)(Q);                                                             // function pointer for raw monadic operation
+typedef Q(*DV)(B,Q,Q,Q);                                                        // function pointer for dyadic verb (arena;verb;alpha;omega)
+typedef Q(*MV)(B,Q,Q);                                                          // function pointer for monadic verb (arena;verb;omega)
+typedef Q(*DAV)(B,Q,Q,Q);                                                       // function pointer for dyadic adverb (arena;verb;alpha;omega)
+typedef Q(*MAV)(B,Q,Q);                                                         // function pointer for monadic adverb (arena;verb;omega)
 
 #define BUMP_UNIT_BYTES   16
 #define BUDDY_UNIT_BYTES  4096
@@ -33,11 +37,11 @@ Q* ptr(Q q){return AB[ha(q)]+(hp(ha(q),q)*AQ[ha(q)]);}
 
 B ip(Q q){return q&&!(7&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
 B itp(Q q){return ip(q) && ha(q)==0;}                                         // Is this Q a pointer to the bump allocated region?
-Q d(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
 B*p(Q q){return (B*)(ptr(q)+6);}                                              // pointers point at header after decoding and need to be adjusted to point at the data
-B v(Q q){return q>>5;}                                                        // verbs are grammatical type, subtype 0. payload in high 59 bits
-B a(Q q){return q>>5;}
-B c(Q q){return q>>5;}                                                        // controls are grammatical type, subtype 2. payload in high 59 bits
+Q di(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
+Q dv(Q q){return q>>5;}                                                        // verbs are grammatical type, subtype 0. payload in high 59 bits
+Q da(Q q){return q>>5;}
+Q dc(Q q){return q>>5;}                                                        // controls are grammatical type, subtype 2. payload in high 59 bits
 
 Q ar(Q r){return (r<<3)|1;}                                                   // create an atom of type 1 (reference)
 Q av(Q v){return (v<<5)|2;}                                                   // create a verb atom (grammatical type 2, subtype 0)
@@ -235,18 +239,18 @@ Q ri(Q q,D i){
 }
 Q vi(D n,D i){if(i>=n){return ac(2);};return an(i);}
 Q qi(Q q,D i){B s=sh(q),tq=t(q);
-  if(1==s){Q qi=vi(n(q),i);return 18==t(qi)?(printf("qi badidx\n"),qi):et(pi(q,d(qi)),tq);};
+  if(1==s){Q qi=vi(n(q),i);return 18==t(qi)?(printf("qi badidx\n"),qi):et(pi(q,di(qi)),tq);};
   return (printf("non shape 1 qi call\n"),ac(1));
 }              // get at index, return tagged Q
 Q ra(Q q){                                                                      // read atom
   if(sh(q)){printf("ra: not an atom\n");return ac(1);}
   switch(t(q)){
-    case 1:  return d(q);
-    case 2:  return v(q);
-    case 3:  return d(q);                                                       // enhance for heap allocated 64 bit num.
-    case 7:  return d(q);
-    case 10: return a(q);
-    case 18: return c(q);
+    case 1:  return di(q);
+    case 2:  return dv(q);
+    case 3:  return di(q);                                                       // enhance for heap allocated 64 bit num.
+    case 7:  return di(q);
+    case 10: return da(q);
+    case 18: return dc(q);
     default: return ac(5);                                                      // not yet implemented
   }
 }
@@ -352,8 +356,9 @@ Q t2g(Q q){
   
   return g;
 }
-
-C* VT[];
+#define VTZ 19
+#define ATZ 4
+C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 void pr_b(Q q,D b){if(q<b){printf("%c",MAP[q]);return;}pr_b(q/b,b);printf("%c",MAP[q%b]);}
@@ -361,7 +366,6 @@ void pr_b(Q q,D b){if(q<b){printf("%c",MAP[q]);return;}pr_b(q/b,b);printf("%c",M
 void pr(Q q){
   if(0==q){return;}
   if(0==t(q)){
-    
     if(!sh(q)){printf("atom type 0?%lld ",q);}
     if(1==sh(q)){printf("(");D nq=n(q);for(D i=0;i<nq;i++){pr(pi(q,i));if(i<nq-1){printf(";");}}; printf(")");}
     if(2==sh(q)){
@@ -373,38 +377,45 @@ void pr(Q q){
         pr(qi(pi(q,2),i));printf(i==nkq-1?"}":";");
       }
     }
-   
   }
-  if(1==t(q)){pr_b(d(q),62);}
-  if(2==t(q)){printf("%s",VT[v(q)]);}
-  if(10==t(q)){printf("adverb: %c\n",a(q));}
-  if(18==t(q)){printf("control: %d\n",c(q));}
+  if(1==t(q)){pr_b(di(q),62);}
+  if(2==t(q)){printf("%s",VT[dv(q)]);}
+  if(10==t(q)){printf("%s",AT[da(q)]);}
+  if(18==t(q)){printf("control: %lld\n",dc(q));}
   if(3==t(q)){
-    if(0==sh(q)){printf("%lld",d(q));}
+    if(0==sh(q)){printf("%lld",di(q));}
     if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld",pi(q,i));if(i<n(q)-1){printf(" ");}}} else {printf("!0");}}
   }
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   if(5==t(q)){printf("hash table: ");for(D i=0;i<cp(q);i++){printf("%d:%lld ",i,pi(q,i));}printf("\n");}
-  if(7==t(q)){printf("`");pr_b(d(q),62);}
+  if(7==t(q)){printf("`");pr_b(di(q),62);}
 }
-DV VD[32];
-MV VM[32];
+DV VD[VTZ];
+MV VM[VTZ];
 
-Q id(Q w){return w;}
-Q en(Q w){B aw=ia(w);Q z=vn(aw?t(w):0,ls(w),1);if(aw){pid(z,0,d(w));}else{zid(z,0,w);};return z;}
-Q tp(Q w){return an(t(w));}
-Q ct(Q w){return an(n(w));}
+Q id(B A,Q v,Q w){return w;}
+Q en(B A,Q v,Q w){B aw=ia(w);Q z=vn(aw?t(w):0,ls(w),1);if(aw){pid(z,0,di(w));}else{zid(z,0,w);};return z;}
+Q tp(B A,Q v,Q w){return an(t(w));}
+Q ct(B A,Q v,Q w){return an(n(w));}
+
+Q dispatch_monad(Q v,Q w);
+Q dispatch_dyad(Q v,Q a,Q w);
 
 typedef enum {DB,LB,RB,MB} BM;                                                          // broadcast mode
-Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=n(w);
-  if(DB==m && na!=nw && sa && sw){return ac(2);}
-  B ib=DB==m?((!ta)||(!tw)):RB==m?!tw:LB==m?!ta:/*MB==m*/!tw;
+Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
+  if(0==d)return ac(0);
+  B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=n(w);
+  if(DB==m && na!=nw && sa && sw){printf("vb length\n");return ac(2);}
+  B ib=d>0?1:(DB==m?((!ta)||(!tw)):RB==m?!tw:LB==m?!ta:/*MB==m*/!tw);
   if(ib){
     D nz=DB==m?(sa?na:nw):RB==m?nw:LB==m?na:nw;
     Q z=ln(nz+(2==sa?1:2==sw?1:0));
     for(D i=0;i<nz;i++){
-      Q ai=1==sa?qi(a,i):2==sa?qi(pi(a,2),i):a;Q wi=1==sw?qi(w,i):2==sw?qi(pi(w,2),i):w;
-      Q zi=DB==m?dv(ai,wi):RB==m?dv(a,wi):LB==m?dv(ai,w):/*MB==m*/mv(wi);
+      Q ai=(m!=RB && 1==sa)?qi(a,i):(m!=RB && 2==sa)?qi(pi(a,2),i):a;Q wi=(m!=LB && 1==sw)?qi(w,i):(m!=LB && 2==sw)?qi(pi(w,2),i):w;
+      //Q zi=DB==m?dv(ai,wi):RB==m?dv(a,wi):LB==m?dv(ai,w):/*MB==m*/mv(wi);
+      Q zi=0;
+      if(MB==m)zi=dispatch_monad(v,wi);
+      else zi=dispatch_dyad(v,ai,wi);
       if(18==t(zi)){return zi;}                                                         // sentinel bubbled up. later: add cleanup
       zid(z,i,zi);
     }
@@ -431,29 +442,29 @@ Q vb(Q a,Q w,MV mv,DV dv,BM m){B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=
   return ac(0);
 }
 
-Q car(Q w){return 0==sh(w)?w:qi(w,0);}
+Q car(B A,Q v,Q w){return 0==sh(w)?w:qi(w,0);}
 
-Q math_m(Q w,MV op){
-  if(0==sh(w)){return an(op(d(w)));}
+Q math_m(Q w,RMO op){
+  if(0==sh(w)){return an(op(di(w)));}
   Q z=vn(t(w),ls(w),n(w));
   for(D i=0;i<n(w);i++){pid(z,i,op(ri(w,i)));}
   return z;
 }
 Q nt_aa(Q w){return !w;}
-Q nt(Q w){Q z=vb(0,w,nt,0,MB);if(18!=t(z)){return z;}if(c(z)){return z;}return math_m(w,nt_aa);}
+Q nt(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}return math_m(w,nt_aa);}
 
-Q tl(Q w){
-  B aw=ia(w);if(aw){w=en(w);};D nw=n(w);Q z=ln(nw);
+Q tl(B A,Q v,Q w){
+  B aw=ia(w);if(aw){w=en(A,av(8),w);};D nw=n(w);Q z=ln(nw);
   for(D i=0;i<nw;i++){
     Q ni=pi(w,i);Q zi=vn(3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
     zid(z,i,zi);
   }
-  return aw?car(z):z;
+  return aw?car(A,av(6),z):z;
 }
 
-Q at(Q a,Q w){
-  Q z=vb(a,w,0,at,RB);
-  if(18!=t(z)){return z;}if(c(z)){return z;}
+Q at(B A,Q v,Q a,Q w){
+  Q z=vb(A,v,a,w,RB,-1);
+  if(18!=t(z)){return z;}if(dc(z)){return z;}
   B aa=ia(a),aw=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);
   if(aw){return aa?a:qi(a,ra(w));}
   z=vn(t(a),ls(a),nz);
@@ -464,9 +475,9 @@ Q at(Q a,Q w){
   return z;
 }
 
-Q math(Q a,Q w,DV op){ // anything that gets here has been broadcasted. we can use the universal getter on both a and w
+Q math(Q a,Q w,RDO op){ // anything that gets here has been broadcasted. we can use the universal getter on both a and w
   D na=n(a),nw=n(w);D nz=na<nw?nw:na;B sa=sh(a),sw=sh(w);B shz=sh(a)<sh(w)?sh(w):sh(a);B lz=ls(a)<ls(w)?ls(w):ls(a);
-  if(0==shz){return an(op(d(a),d(w)));}
+  if(0==shz){return an(op(di(a),di(w)));}
   Q z=vn(t(a),lz,nz);
   for(D i=0;i<nz;i++){Q ai=sa?ri(a,i):ra(a);Q wi=sw?ri(w,i):ra(w);
     Q zi=op(ai,wi);
@@ -476,8 +487,6 @@ Q math(Q a,Q w,DV op){ // anything that gets here has been broadcasted. we can u
 }
 Q pl_aa(Q a,Q w){ return a+w;}
 Q ml_aa(Q a,Q w){ return a*w;}
-Q pl(Q a,Q w){Q z=vb(a,w,0,pl,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
-Q ml(Q a,Q w){Q z=vb(a,w,0,ml,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,ml_aa);}
 Q mn_aa(Q a,Q w){return a<w?a:w;}
 Q mx_aa(Q a,Q w){return a>w?a:w;}
 Q eq_aa(Q a,Q w){return a==w;}
@@ -486,38 +495,85 @@ Q gt_aa(Q a,Q w){return a>w;}
 Q an_aa(Q a,Q w){return a&w;}
 Q or_aa(Q a,Q w){return a|w;}
 Q xr_aa(Q a,Q w){return a^w;}
-Q bn_aa(Q w){return ~w;}
 Q sb_aa(Q a,Q w){return a-w;}
+
+Q bn_aa(Q w){return ~w;}
 Q ng_aa(Q w){return -w;}
 
-Q mn(Q a,Q w){Q z=vb(a,w,0,mn,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,mn_aa);}
-Q mx(Q a,Q w){Q z=vb(a,w,0,mx,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,mx_aa);}
-Q eq(Q a,Q w){Q z=vb(a,w,0,eq,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,eq_aa);}
-Q lt(Q a,Q w){Q z=vb(a,w,0,lt,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,lt_aa);}
-Q gt(Q a,Q w){Q z=vb(a,w,0,gt,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,gt_aa);}
-Q an_op(Q a,Q w){Q z=vb(a,w,0,an_op,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,an_aa);}
-Q or_op(Q a,Q w){Q z=vb(a,w,0,or_op,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,or_aa);}
-Q xr(Q a,Q w){Q z=vb(a,w,0,xr,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,xr_aa);}
-Q bn(Q w){Q z=vb(0,w,bn,0,MB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math_m(w,bn_aa);}
-Q sb(Q a,Q w){Q z=vb(a,w,0,sb,DB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math(a,w,sb_aa);}
-Q ng(Q w){Q z=vb(0,w,ng,0,MB);if(18!=t(z)){return z;}if(c(z)){return z;}; return math_m(w,ng_aa);}
+Q pl(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
+Q ml(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,ml_aa);}
+Q mn(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,mn_aa);}
+Q mx(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,mx_aa);}
+Q eq(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,eq_aa);}
+Q lt(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,lt_aa);}
+Q gt(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,gt_aa);}
+Q nd(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,an_aa);}
+Q or(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,or_aa);}
+Q xr(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,xr_aa);}
+Q sb(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,sb_aa);}
+
+Q bn(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math_m(w,bn_aa);}
+Q ng(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math_m(w,ng_aa);}
 
 Q set(Q a,Q w,D sp){
   dkv(SC[sp],a,w);
   return w;
 }
 
-Q ca(Q a,Q w){
+Q ca(B A,Q v,Q a,Q w){
   B tz=(t(a)==t(w))?t(a):0;
   D j=0;D na=n(a),nw=n(w);Q z=vn(tz,tz?ls(a):3,na+nw);
-  for(D i=0;i<na;i++,j++){Q ai=at(a,an(i));qid(z,j,tz?ra(ai):ai);} // decode if not type 0
-  for(D i=0;i<nw;i++,j++){Q wi=at(w,an(i));qid(z,j,tz?ra(wi):wi);} // decode if atom or somethig
+  for(D i=0;i<na;i++,j++){Q ai=at(A,av(3),a,an(i));qid(z,j,tz?ra(ai):ai);} // decode if not type 0
+  for(D i=0;i<nw;i++,j++){Q wi=at(A,av(3),w,an(i));qid(z,j,tz?ra(wi):wi);} // decode if atom or somethig
   return z;
 }
 
-DV VD[32]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,an_op,or_op,0,sb};
-MV VM[32]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng};
-C* VT[]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-"};
+Q el(B A,Q v,Q a,Q w){return vb(A,v,a,w,LB,1);}
+Q er(B A,Q v,Q a,Q w){return vb(A,v,a,w,RB,1);}
+Q ed(B A,Q v,Q a,Q w){return vb(A,v,a,w,DB,1);}
+Q em(B A,Q v,Q w){return vb(A,v,0,w,MB,1);}
+Q ov(B A,Q v,Q w){
+  if(0==sh(w))return dispatch_monad(v,w);
+  D nw=n(w);if(0==nw){printf("ov empty\n");return ac(2);}
+  Q a=qi(w,0);
+  for(D i=1;i<nw;i++){a=dispatch_dyad(v,a,qi(w,i));}
+  return a;
+}
+Q sc(B A,Q v,Q w){
+  if(0==sh(w))return dispatch_monad(v,w);
+  D nw=n(w);Q z=ln(nw);
+  Q a=qi(w,0);zid(z,0,a);
+  for(D i=1;i<nw;i++){a=dispatch_dyad(v,a,qi(w,i));zid(z,i,a);}
+  return z;
+}
+
+DV VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb};
+MV VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng};
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-"};
+DAV AVD[ATZ]={0,er,el,ed};
+MAV AVM[ATZ]={0,ov,sc,em};
+C* AT[ATZ]={" ","/","\\","'"};
+
+Q dispatch_monad(Q v,Q w){
+  Q r=dv(v);
+  if(r<32)return VM[r](0,v,w);
+  D c=(r-32)%6;Q b=av((r-32)/6);
+  if(2==c)return em(0,b,w);        // each
+  if(1==c)return sc(0,b,w);        // scan
+  if(0==c)return ov(0,b,w);        // over
+  printf("dispatch_monad busted c:%d\n",c);
+  return ac(2);
+}
+Q dispatch_dyad(Q v,Q a,Q w){
+  Q r=dv(v);
+  if(r<32)return VD[r](0,v,a,w);
+  D c=(r-32)%6;Q b=av((r-32)/6);
+  if(2==c)return ed(0,b,a,w);      // each
+  if(1==c)return el(0,b,a,w);      // eachleft
+  if(0==c)return er(0,b,a,w);      // eachright
+  printf("dispatch_dyad busted c:%d\n",c);
+  return ac(2);
+}
 
 Q Ap(Q a){Q p=tsn(4,1,3,1);pid(p,0,a);return p;}
 Q e(Q* q);
@@ -536,26 +592,28 @@ Q ecc(Q* q){
 }
 
 Q emv(Q*q){
-  Q w=e(q+1);
-  if(4==t(w)){Q p=tsn(4,1,3,1);pid(p,0,*q);return ca(p,w);}
-  return VM[v(*q)](w);
+  Q v=*q++;
+  while(10==t(*q)){v=av(dv(v)*6+(da(*q++)-1)+32);}
+  Q w=e(q);
+  if(4==t(w)){Q p=tsn(4,1,3,1);pid(p,0,v);return ca(0,av(8),p,w);}
+  return dispatch_monad(v,w);
 }
 
 Q edv(Q a,Q*q){
-  D current_sp = SP;                                                        // Cache the scope pointer before evaluating the right-hand side.
-  Q w=e(q+1);B i=v(*q);
-  if(4==t(w)&&(7!=i)){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,*q);return ca(p,w);}  // handle partial evaluations but allow assignment of them instantly. 
-  a=((1==t(a))&&(7!=i))?dk(SC[current_sp],a):a;
-  if(7==i){return set(a,w,current_sp);}                                     // If this is an assignment, use the cached scope pointer to write into the correct scope.
-  DV dv=VD[i];
-  return dv(a,w);
+  D current_sp = SP;Q v=*q++;
+  while(10==t(*q)){v=av(dv(v)*6+(da(*q++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
+  Q w=e(q);
+  if(4==t(w)&&(7!=dv(v))){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
+  a=((1==t(a))&&(7!=dv(v)))?dk(SC[current_sp],a):a;
+  if(7==dv(v)){return set(a,w,current_sp);}                                     // If this is an assignment, use the cached scope pointer to write into the correct scope.
+  return dispatch_dyad(v,a,w);
 }
 
 Q E(Q* q, C tc){
   Q r = 0;
-  while(*q && !(18==t(*q)&&tc==c(*q))){
+  while(*q && !(18==t(*q)&&tc==dc(*q))){
     r = e(q);
-    while(*q && !(18==t(*q) && c(*q)==';')) q++;                            // Find the end of the evaluated expression
+    while(*q && !(18==t(*q) && dc(*q)==';')) q++;                            // Find the end of the evaluated expression
     if(*q) q++;                                                             // If we found a semicolon, skip it to start the next expression
   }
   return r;
@@ -564,15 +622,15 @@ Q E(Q* q, C tc){
 Q e(Q* q){
   Q a=*q;
   if(!a){return tsn(4,1,3,0);}                                  // If a is the end of the stream then we must have missing data. return type 4
-  if(18==t(a) && ';'==c(a)){return tsn(4,1,3,0);}              
+  if(18==t(a) && ';'==dc(a)){return tsn(4,1,3,0);}              
   if(18==t(a)){
-    if('{'==c(a)) return eoc(q);                                // this creates a scope dictionary and returns it.
-    if('}'==c(a)) return ecc(q);                                // this terminates a scope dictionary and behaves like a semicolon
-    if(';'==c(a)) return tsn(4,1,3,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
+    if('{'==dc(a)) return eoc(q);                                // this creates a scope dictionary and returns it.
+    if('}'==dc(a)) return ecc(q);                                // this terminates a scope dictionary and behaves like a semicolon
+    if(';'==dc(a)) return tsn(4,1,3,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
   }
   Q w=q[1];                                                     // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
-  B endexpr = !w || (18==t(w) && c(w)==';');                    // end of expression is null or semicolon or }
-  B endscope = w && (18==t(w) && c(w)=='}');                    // end of scope is }
+  B endexpr = !w || (18==t(w) && dc(w)==';');                    // end of expression is null or semicolon or }
+  B endscope = w && (18==t(w) && dc(w)=='}');                    // end of scope is }
   B end = endexpr || endscope;
   if(endscope){ecc(q);}
   return (2==t(a)&&!end)  ?                                // if a is a verb and w isn't the end of the stream
@@ -589,12 +647,14 @@ Q e(Q* q){
 }
 
 Q R(C a){return ('a'<=a&&a<='z')?ar(a-'a'):0;}
-D FV(C* s){
-  for(D i=0;i<sizeof(VT)/sizeof(VT[0]);i++){
-    if(strcmp(VT[i],s)==0) return i;
+D FG(C* T[],B n,C* s){
+  for(D i=0;i<n;i++){
+    if(strcmp(T[i],s)==0) return i;
   }
   return 0;
 }
+D FV(C* s){return FG(VT,VTZ,s);}
+D FA(C* s){return FG(AT,ATZ,s);}
 Q V(C c){C s[2]={c,0};D i=FV(s);return i?av(i):0;}
 Q parse_b(C* s, D len, D base){
   Q r=0,p=1;
@@ -610,8 +670,7 @@ Q parse_b(C* s, D len, D base){
 //              !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
 static C* CST="1757AA7988777B49333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
 D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
-Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
-  D TT[7][12]={ // Transition Table
+D TT[7][12]={ // Transition Table
   // NUL SPC ALP DIG DOT QOT BQT VER CTL ADV OTH NEG
     {7,  0,  4,  2,  4,  5,  6,  7,  7,  7,  7,  1}, // 0 S_START
     {7,  7,  7,  2,  7,  7,  7,  7,  7,  7,  7,  7}, // 1 S_NEG
@@ -621,10 +680,11 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
     {7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7}, // 5 S_STR (TODO)
     {7,  7,  6,  6,  6,  7,  0,  7,  7,  7,  7,  7}, // 6 S_SYM
   };
+Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
   while(st!=7){
     C*s=p;D cc=cl(*p);st=TT[0][cc]; // s:token start
     if(st==0){p++;continue;} // whitespace
-    if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(*p);p++;st=0;continue;} // verbs, controls, adverbs
+    if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(FA(ts));p++;st=0;continue;} // verbs, controls, adverbs
     while(st!=7){
       p++;cc=cl(*p);D next_st=TT[st][cc];
       if(st==1&&next_st!=2){q[qi++]=V(*s);p=s+1;st=0;break;} // not a number, treat '-' as a verb

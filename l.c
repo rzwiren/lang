@@ -50,8 +50,9 @@ Q ac(Q c){return (c<<5)|(2<<3)|2;}                                            //
 Q an(Q n){return (n<(1ULL<<61))?((n<<3)|3):(0|3);}                            // create an atom of type 3 (integer) TODO: heap allocated 64 bit int. return 3 as a tagged 0 for stuff that should really be allocated on heap. bitnot is broken on atoms due to this. 
 Q ap(Q v){return (v<<3)|4;}                                                   // create an atom of type 4 (partial eval) - HEAP ONLY
                                                                               // type 5 is hash
+Q ach(C c){return ((Q)(B)c<<3)|6;}                                            // create an atom of type 6 (char)
 Q as(Q s){return (s<<3)|7;}                                                   // create an atom of type 7 (symbol)
-Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):ac(q);} // encode data of an atom based on the type
+Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach(q):ac(q);} // encode data of an atom based on the type
 
 B ia(Q q){return !ip(q);}                                                     // is atom  from pointer
 B t(Q q){
@@ -249,6 +250,7 @@ Q ra(Q q){                                                                      
     case 2:  return dv(q);
     case 3:  return di(q);                                                       // enhance for heap allocated 64 bit num.
     case 7:  return di(q);
+    case 6:  return di(q);
     case 10: return da(q);
     case 18: return dc(q);
     default: return ac(5);                                                      // not yet implemented
@@ -290,6 +292,7 @@ Q fk(D* ht,Q k,D c,Q keys){                                                     
   return c;                                                                     // Sentinel for "table is full and key not found"
 } 
 Q SC[1024]; D SP=0;Q G;
+Q NL[1024]; D LP=0;
 
 Q dki(Q d, Q k){                                                                // inner "dictionary key" lookup for a single dictionary
   if(!ip(d)||2!=sh(d)) return 0;                                                // Not a dictionary
@@ -357,7 +360,7 @@ Q t2g(Q q){
   return g;
 }
 #define VTZ 19
-#define ATZ 4
+#define ATZ 7
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
@@ -381,7 +384,11 @@ void pr(Q q){
   if(1==t(q)){pr_b(di(q),62);}
   if(2==t(q)){printf("%s",VT[dv(q)]);}
   if(10==t(q)){printf("%s",AT[da(q)]);}
-  if(18==t(q)){printf("control: %lld\n",dc(q));}
+  if(18==t(q)){printf("control: %c\n",dc(q));}
+  if(6==t(q)){
+    if(0==sh(q)){printf("\"%c\"",di(q));}
+    if(1==sh(q)){printf("\"");for(D i=0;i<n(q);i++)printf("%c",pi(q,i));printf("\"");}
+  }
   if(3==t(q)){
     if(0==sh(q)){printf("%lld",di(q));}
     if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld",pi(q,i));if(i<n(q)-1){printf(" ");}}} else {printf("!0");}}
@@ -404,12 +411,12 @@ Q dispatch_dyad(Q v,Q a,Q w);
 typedef enum {DB,LB,RB,MB} BM;                                                          // broadcast mode
 Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
   if(0==d)return ac(0);
-  B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=n(a),nw=n(w);
+  B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=2==sa?n(pi(a,1)):n(a),nw=2==sw?n(pi(w,1)):n(w);
   if(DB==m && na!=nw && sa && sw){printf("vb length\n");return ac(2);}
   B ib=d>0?1:(DB==m?((!ta)||(!tw)):RB==m?!tw:LB==m?!ta:/*MB==m*/!tw);
   if(ib){
     D nz=DB==m?(sa?na:nw):RB==m?nw:LB==m?na:nw;
-    Q z=ln(nz+(2==sa?1:2==sw?1:0));
+    Q z=ln(nz);
     for(D i=0;i<nz;i++){
       Q ai=(m!=RB && 1==sa)?qi(a,i):(m!=RB && 2==sa)?qi(pi(a,2),i):a;Q wi=(m!=LB && 1==sw)?qi(w,i):(m!=LB && 2==sw)?qi(pi(w,2),i):w;
       //Q zi=DB==m?dv(ai,wi):RB==m?dv(a,wi):LB==m?dv(ai,w):/*MB==m*/mv(wi);
@@ -549,10 +556,10 @@ Q sc(B A,Q v,Q w){
 
 DV VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb};
 MV VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng};
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-"};
-DAV AVD[ATZ]={0,er,el,ed};
-MAV AVM[ATZ]={0,ov,sc,em};
-C* AT[ATZ]={" ","/","\\","'"};
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+DAV AVD[ATZ]={0,er,el,ed,ed,er,el};
+MAV AVM[ATZ]={0,ov,sc,em,em,ov,sc};
+C* AT[ATZ]={" ","/","\\","'","each","over","scan"};
 
 Q dispatch_monad(Q v,Q w){
   Q r=dv(v);
@@ -576,69 +583,88 @@ Q dispatch_dyad(Q v,Q a,Q w){
 }
 
 Q Ap(Q a){Q p=tsn(4,1,3,1);pid(p,0,a);return p;}
-Q e(Q* q);
-Q E(Q* q,C tc);
-Q eoc(Q* q){
-  if(SP+1 >= 1024) return ac(6);                                            // scope depth overflow
+Q e(Q** q);
+Q E(Q** q,C tc);
+Q eoc(Q** q){
+  (*q)++;
+  if(SP+1 >= 1024) return ac(99);                                            // scope depth overflow
   SP++;D csp=SP;                                                            // cache the SP of this new allocation, return that.
   SC[SP] = dn(0,3,0);                                                       // Allocate new dictionary for the new scope
-  E(q+1,'}');                                                               // Evaluate the inner expression
+  E(q,'}');                                                               // Evaluate the inner expression
+  //if(**q && 18==t(**q) && dc(**q)=='}'){ printf("eoc advanced past }\n");(*q)++;}
   return SC[csp];                                                           // Return the created dictionary
 }
 
-Q ecc(Q* q){
-  if(SP > 0) SP--;
-  return tsn(4,1,3,0);                                                      // Behave like a semicolon, terminating the expression
-}
+Q ecc(Q** q){printf("ecc\n");Q d=SC[SP];if(SP > 0) SP--;return d;}                           // Behave like a semicolon, terminating the expression
 
-Q emv(Q*q){
-  Q v=*q++;
-  while(10==t(*q)){v=av(dv(v)*6+(da(*q++)-1)+32);}
+Q eol(Q** q){
+  (*q)++;
+  if(LP+1 >= 1024) return ac(99);
+  LP++;D clp=LP;
+  NL[LP] = vc(0,3,64,0);
+  E(q,')');
+  //if(**q && 18==t(**q) && dc(**q)==')'){printf("eol advanced past )\n"); (*q)++; }// if we landed on ')' advance theh pointer by 1 at the end.
+  return NL[clp];
+}
+Q ecl(Q** q){Q l=NL[LP];if(LP > 0) LP--;return l;}
+
+Q emv(Q** q){
+  Q v=*(*q)++;
+  while(10==t(**q)){v=av(dv(v)*6+(da(*(*q)++)-1)+32);}
   Q w=e(q);
   if(4==t(w)){Q p=tsn(4,1,3,1);pid(p,0,v);return ca(0,av(8),p,w);}
-  return dispatch_monad(v,w);
+  Q r=dispatch_monad(v,w);
+  return r;
 }
 
-Q edv(Q a,Q*q){
-  D current_sp = SP;Q v=*q++;
-  while(10==t(*q)){v=av(dv(v)*6+(da(*q++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
+Q edv(Q a,Q** q){
+  D current_sp = SP;Q v=*(*q)++;
+  while(10==t(**q)){v=av(dv(v)*6+(da(*(*q)++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q);
   if(4==t(w)&&(7!=dv(v))){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
   a=((1==t(a))&&(7!=dv(v)))?dk(SC[current_sp],a):a;
   if(7==dv(v)){return set(a,w,current_sp);}                                     // If this is an assignment, use the cached scope pointer to write into the correct scope.
-  return dispatch_dyad(v,a,w);
+  Q r=dispatch_dyad(v,a,w);
+  return r;
 }
 
-Q E(Q* q, C tc){
-  Q r = 0;
-  while(*q && !(18==t(*q)&&tc==dc(*q))){
-    r = e(q);
-    while(*q && !(18==t(*q) && dc(*q)==';')) q++;                            // Find the end of the evaluated expression
-    if(*q) q++;                                                             // If we found a semicolon, skip it to start the next expression
+Q E(Q** q, C tc){
+  Q r = 0;D clp=LP;
+  while(**q && !(18==t(**q)&&tc==dc(**q))){
+    r=e(q);
+    if(tc==')'){Q l=NL[clp];D idx=n(l);xn(l,1);zid(l,idx,r);}
+    while(**q && !(18==t(**q) && dc(**q)==';')) { // Find the end of the evaluated expression
+      if(18==t(**q) && tc==dc(**q)){printf("early return found %c %d\n",tc,clp);(*q)++;return r;}    // if we find the ending character then break from the loop without advancing past that character
+      (*q)++; 
+    }                           
+    if(**q && 18==t(**q) && ';'==dc(**q)){(*q)++;}  // advance past ; if it was encountered                                                             // If we found a semicolon, skip it to start the next expression
   }
   return r;
 }
 
-Q e(Q* q){
-  Q a=*q;
+Q e(Q** q){
+  Q a=**q;
   if(!a){return tsn(4,1,3,0);}                                  // If a is the end of the stream then we must have missing data. return type 4
-  if(18==t(a) && ';'==dc(a)){return tsn(4,1,3,0);}              
   if(18==t(a)){
-    if('{'==dc(a)) return eoc(q);                                // this creates a scope dictionary and returns it.
-    if('}'==dc(a)) return ecc(q);                                // this terminates a scope dictionary and behaves like a semicolon
+    if('{'==dc(a)){a=eoc(q);}
+    if('}'==dc(a)){a=ecc(q);}
+    if('('==dc(a)){a=eol(q);}
+    if(')'==dc(a)){a=ecl(q);}
     if(';'==dc(a)) return tsn(4,1,3,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
   }
-  Q w=q[1];                                                     // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
+  Q w=(*q)[1];                                                     // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
   B endexpr = !w || (18==t(w) && dc(w)==';');                    // end of expression is null or semicolon or }
   B endscope = w && (18==t(w) && dc(w)=='}');                    // end of scope is }
-  B end = endexpr || endscope;
+  B endlist = w && (18==t(w) && dc(w)==')');                    // end of list is )
+  B end = endexpr || endscope || endlist;
   if(endscope){ecc(q);}
+  if(endlist){ecl(q);}
   return (2==t(a)&&!end)  ?                                // if a is a verb and w isn't the end of the stream
          emv(q)        :                                       //  then evaluate a monadic verb
          (2==t(a)&&end) ?                                   // if a is a verb and we have hit the end of the stream
          Ap(a)         :                                       //  then create a dyadic partial evaluation
          (!end&&2==t(w))  ?                                   // if w is non-zero and is a verb
-         edv(a,q+1)    :                                       //  then eval dyadic verb
+         edv(a,(((*q)++),q))    :                                       //  then eval dyadic verb
          (4==t(a)&&end) ?                                   // if a is a partial evaluation and we don't have a w 
          a             :                                       //  then just return the partial up the stack. 
          (1==t(a))     ?                                       // if a is a reference (and not being assigned to)
@@ -670,16 +696,26 @@ Q parse_b(C* s, D len, D base){
 //              !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
 static C* CST="1757AA7988777B49333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
 D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
-D TT[7][12]={ // Transition Table
+D TT[9][12]={ // Transition Table
   // NUL SPC ALP DIG DOT QOT BQT VER CTL ADV OTH NEG
     {7,  0,  4,  2,  4,  5,  6,  7,  7,  7,  7,  1}, // 0 S_START
     {7,  7,  7,  2,  7,  7,  7,  7,  7,  7,  7,  7}, // 1 S_NEG
-    {7,  7,  7,  2,  3,  7,  7,  7,  7,  7,  7,  7}, // 2 S_INT
-    {7,  7,  7,  3,  7,  7,  7,  7,  7,  7,  7,  7}, // 3 S_FLT
+    {7,  8,  7,  2,  3,  7,  7,  7,  7,  7,  7,  7}, // 2 S_INT
+    {7,  8,  7,  3,  7,  7,  7,  7,  7,  7,  7,  7}, // 3 S_FLT
     {7,  7,  4,  4,  4,  7,  7,  7,  7,  7,  7,  7}, // 4 S_NAME
-    {7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7}, // 5 S_STR (TODO)
+    {7,  5,  5,  5,  5,  7,  5,  5,  5,  5,  5,  5}, // 5 S_STR
     {7,  7,  6,  6,  6,  7,  0,  7,  7,  7,  7,  7}, // 6 S_SYM
+    {7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7}, // 7 S_DONE
+    {7,  8,  7,  2,  3,  7,  7,  7,  7,  7,  7,  7}, // 8 S_VEC
   };
+Q pn(C* s, D len){
+  D c=0;C* p=s;
+  while(*p){while(*p==' ')p++;if(!*p)break;c++;while(*p&&*p!=' ')p++;}
+  if(c==1){p=s;while(*p==' ')p++;C* t=p;while(*p&&*p!=' ')p++;return an(parse_b(t,p-t,10));}
+  Q z=vn(3,3,c);p=s;
+  for(D i=0;i<c;i++){while(*p==' ')p++;C* t=p;while(*p&&*p!=' ')p++;pid(z,i,parse_b(t,p-t,10));}
+  return z;
+}
 Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
   while(st!=7){
     C*s=p;D cc=cl(*p);st=TT[0][cc]; // s:token start
@@ -690,14 +726,16 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
       if(st==1&&next_st!=2){q[qi++]=V(*s);p=s+1;st=0;break;} // not a number, treat '-' as a verb
       if(next_st==7){ // End of token.
         D len=p-s;C t[100];strncpy(t,s,len);t[len]='\0';
-        if(st==1||st==2) q[qi++]=an(parse_b(t,len,10));
-        else if(st==3)  q[qi++]=an(parse_b(t,len,10)); // TODO: float support
+        if(st==1||st==2||st==3||st==8) q[qi++]=pn(t,len);
         else if(st==4){
           D vi=FV(t);
-          if(vi) q[qi++]=av(vi); else q[qi++]=ar(parse_b(t,len,62));
+          D ai=FA(t);
+          if(vi) q[qi++]=av(vi); else if(ai) q[qi++]=aa(ai);
+          else q[qi++]=ar(parse_b(t,len,62));
         }
         else if(st==6){ s++; len--; strncpy(t,s,len);t[len]='\0'; q[qi++]=as(parse_b(t,len,62));}
-        // TODO: S_STR, S_FLT
+        else if(st==5){ s++; len--; Q z=vn(6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z;}
+        // TODO: S_FLT
         st=0;break;
       }
       st=next_st;
@@ -731,7 +769,8 @@ D main(void){
       }
       AI[0]=0;SC[0]=dni(0,3,0,0); SP=0; 
      } // reset THI only if evaluation takes us back to the global scope. 
-    Q r=E(lx(buffer),'\0');
+    Q* tokens = lx(buffer);
+    Q r=E(&tokens,'\0');
     pr(r);printf("\n");
   }
   return 0;

@@ -23,6 +23,7 @@ Areas explored:
    atomic
    uniform
   adverbs
+   no ambivalence for clarity
  Demonstrate techniques to efficiently organize data
   Data types
    pointer
@@ -84,7 +85,7 @@ the order portion of pointer like Q objects is 5 bits because
  31 distinct monotonically increasing allocation sizes should be sufficient regardless of the allocator backing the arena.
  temp arena (bump allocated)
   smallest size of allocation is 16 bytes, 
-  largest is 8 bytes*2^32
+  largest is 8 bytes*2^32 (what if we add support for 128bit uuids?)
   needs 
  global arena (buddy)
   min size 2^12 bytes (page)
@@ -92,3 +93,13 @@ the order portion of pointer like Q objects is 5 bits because
  the largest vector size is currently 2^32 
  and the minimum allocation size is 16 bytes 
  so any allocator implementation needs 5 bits to represent all possible allocation sizes. 
+  it is worth noting that some allocators don't pay attention to those 5 bits (bump, filebump) so they do not need to be stored
+   this allows for larger payloads for those allocators. 
+
+vb is already a tool that can be used to do a depth first walk. you can reimplement t2g and printing to use vb like any other verb. write a copying verb and then arena to arena copyign become parameterizations.
+
+Guiding Principles of Design:
+ 1. Embrace the fact that a CPU is an interpreter
+ 2. Hardware engineers are brilliant. Use/expose the wonderful tools they have given to us.
+  a. Three dimensions are enough (length x element width x lanecount). No need to optimize for multi dimensional arrays.
+  a. Expose SIMD cleanly. Don't try to stuff vector tools through scalar APIs that we call programming languages. 

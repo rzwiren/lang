@@ -734,7 +734,7 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
           else q[qi++]=ar(parse_b(t,len,62));
         }
         else if(st==6){ s++; len--; strncpy(t,s,len);t[len]='\0'; q[qi++]=as(parse_b(t,len,62));}
-        else if(st==5){ s++; len--; Q z=vn(6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z;}
+        else if(st==5){ s++; len--; Q z=vn(6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z; if(*p)p++;}
         // TODO: S_FLT
         st=0;break;
       }

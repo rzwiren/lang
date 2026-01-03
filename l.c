@@ -31,34 +31,34 @@ Q* AB[8];Q AI[8];Q AC[8];
 Q AM[8];
 Q AQ[8]={BUMP_UNIT_QS,BUDDY_UNIT_QS,0,0,0,0,0,0};
 Q BF[32];
-B ha(Q q){return (q>>3)&7;}
-Q hp(B a,Q q){return q>>(0==a?6:1==a?11:6);}
+B ha(Q q){return (q>>4)&7;}
+Q hp(B a,Q q){return q>>(0==a?7:1==a?12:7);}
 Q* ptr(Q q){return AB[ha(q)]+(hp(ha(q),q)*AQ[ha(q)]);}
 
-B ip(Q q){return q&&!(7&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
+B ip(Q q){return q&&!(15&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
 B itp(Q q){return ip(q) && ha(q)==0;}                                         // Is this Q a pointer to the bump allocated region?
 B*p(Q q){return (B*)(ptr(q)+6);}                                              // pointers point at header after decoding and need to be adjusted to point at the data
-Q di(Q q){return q>>3;}                                                        // shift out the flags. decodes small integers
-Q dv(Q q){return q>>5;}                                                        // verbs are grammatical type, subtype 0. payload in high 59 bits
-Q da(Q q){return q>>5;}
-Q dc(Q q){return q>>5;}                                                        // controls are grammatical type, subtype 2. payload in high 59 bits
+Q di(Q q){return q>>4;}                                                        // shift out the flags. decodes small integers
+Q dv(Q q){return q>>6;}                                                        // verbs are grammatical type, subtype 0. payload in high 59 bits
+Q da(Q q){return q>>6;}
+Q dc(Q q){return q>>6;}                                                        // controls are grammatical type, subtype 2. payload in high 59 bits
 
-Q ar(Q r){return (r<<3)|1;}                                                   // create an atom of type 1 (reference)
-Q av(Q v){return (v<<5)|2;}                                                   // create a verb atom (grammatical type 2, subtype 0)
-Q aa(Q a){return (a<<5)|(1<<3)|2;}                                            // create an adverb atom (grammatical type 2, subtype 1)
-Q ac(Q c){return (c<<5)|(2<<3)|2;}                                            // create a control atom (grammatical type 2, subtype 2)
-Q an(Q n){return (n<(1ULL<<61))?((n<<3)|3):(0|3);}                            // create an atom of type 3 (integer) TODO: heap allocated 64 bit int. return 3 as a tagged 0 for stuff that should really be allocated on heap. bitnot is broken on atoms due to this. 
-Q ap(Q v){return (v<<3)|4;}                                                   // create an atom of type 4 (partial eval) - HEAP ONLY
+Q ar(Q r){return (r<<4)|1;}                                                   // create an atom of type 1 (reference)
+Q av(Q v){return (v<<6)|2;}                                                   // create a verb atom (grammatical type 2, subtype 0)
+Q aa(Q a){return (a<<6)|(1<<4)|2;}                                            // create an adverb atom (grammatical type 2, subtype 1)
+Q ac(Q c){return (c<<6)|(2<<4)|2;}                                            // create a control atom (grammatical type 2, subtype 2)
+Q an(Q n){return (n<(1ULL<<60))?((n<<4)|3):(0|3);}                            // create an atom of type 3 (integer) TODO: heap allocated 64 bit int. return 3 as a tagged 0 for stuff that should really be allocated on heap. bitnot is broken on atoms due to this. 
+Q ap(Q v){return (v<<4)|4;}                                                   // create an atom of type 4 (partial eval) - HEAP ONLY
                                                                               // type 5 is hash
-Q ach(C c){return ((Q)(B)c<<3)|6;}                                            // create an atom of type 6 (char)
-Q as(Q s){return (s<<3)|7;}                                                   // create an atom of type 7 (symbol)
+Q ach(C c){return ((Q)(B)c<<4)|6;}                                            // create an atom of type 6 (char)
+Q as(Q s){return (s<<4)|7;}                                                   // create an atom of type 7 (symbol)
 Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach(q):ac(q);} // encode data of an atom based on the type
 
 B ia(Q q){return !ip(q);}                                                     // is atom  from pointer
 B t(Q q){
   if(!ia(q))return ptr(q)[0];
-  B tag=q&7;
-  if(tag==2)return q&31;
+  B tag=q&15;
+  if(tag==2)return q&63;
   return tag;
 }
 B sh(Q q){return ia(q)?0:ptr(q)[1];}                                           // shape    from header
@@ -139,7 +139,7 @@ Q bumpalloc(B t,B s,B z,D n,D c,B a){
   AI[0]+=units;
   ah(o,t,s,z,0,n,c);
   memset(o+6,0,pz(z,c));
-  return (off<<6)|(0<<3);
+  return (off<<7)|(0<<4);
 }
 void bumpfree(B a){AI[a]=0;}
 void buddyinit(B a){
@@ -187,12 +187,12 @@ Q buddyalloc(B t,B s,B z,D n,D c,B a){
   ah(o,t,s,z,0,n,c);
   memset(o+6, 0, pz(z,c));
 
-  return (off << 11) | (ord << 6) | (1 << 3) ;
+  return (off << 12) | (ord << 7) | (1 << 4) ;
 }
 void buddyfree(Q q){
   B a   = ha(q);
   Q off = hp(a,q);
-  B ord = (q>>6)&31;
+  B ord = (q>>7)&31;
   while(ord<31){
     Q u = buddy_units_from_order(ord);
     Q b = off ^ u;
@@ -240,7 +240,7 @@ Q ri(Q q,D i){
 }
 Q vi(D n,D i){if(i>=n){return ac(2);};return an(i);}
 Q qi(Q q,D i){B s=sh(q),tq=t(q);
-  if(1==s){Q qi=vi(n(q),i);return 18==t(qi)?(printf("qi badidx\n"),qi):et(pi(q,di(qi)),tq);};
+  if(1==s){Q qi=vi(n(q),i);return 34==t(qi)?(printf("qi badidx\n"),qi):et(pi(q,di(qi)),tq);};
   return (printf("non shape 1 qi call\n"),ac(1));
 }              // get at index, return tagged Q
 Q ra(Q q){                                                                      // read atom
@@ -251,8 +251,8 @@ Q ra(Q q){                                                                      
     case 3:  return di(q);                                                       // enhance for heap allocated 64 bit num.
     case 7:  return di(q);
     case 6:  return di(q);
-    case 10: return da(q);
-    case 18: return dc(q);
+    case 18: return da(q);
+    case 34: return dc(q);
     default: return ac(5);                                                      // not yet implemented
   }
 }
@@ -383,8 +383,8 @@ void pr(Q q){
   }
   if(1==t(q)){pr_b(di(q),62);}
   if(2==t(q)){printf("%s",VT[dv(q)]);}
-  if(10==t(q)){printf("%s",AT[da(q)]);}
-  if(18==t(q)){printf("control: %c\n",dc(q));}
+  if(18==t(q)){printf("%s",AT[da(q)]);}
+  if(34==t(q)){printf("control: %c\n",dc(q));}
   if(6==t(q)){
     if(0==sh(q)){printf("\"%c\"",di(q));}
     if(1==sh(q)){printf("\"");for(D i=0;i<n(q);i++)printf("%c",pi(q,i));printf("\"");}
@@ -423,7 +423,7 @@ Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
       Q zi=0;
       if(MB==m)zi=dispatch_monad(v,wi);
       else zi=dispatch_dyad(v,ai,wi);
-      if(18==t(zi)){return zi;}                                                         // sentinel bubbled up. later: add cleanup
+      if(34==t(zi)){return zi;}                                                         // sentinel bubbled up. later: add cleanup
       zid(z,i,zi);
     }
     if(2==sa){
@@ -458,7 +458,7 @@ Q math_m(Q w,RMO op){
   return z;
 }
 Q nt_aa(Q w){return !w;}
-Q nt(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}return math_m(w,nt_aa);}
+Q nt(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}return math_m(w,nt_aa);}
 
 Q tl(B A,Q v,Q w){
   B aw=ia(w);if(aw){w=en(A,av(8),w);};D nw=n(w);Q z=ln(nw);
@@ -471,7 +471,7 @@ Q tl(B A,Q v,Q w){
 
 Q at(B A,Q v,Q a,Q w){
   Q z=vb(A,v,a,w,RB,-1);
-  if(18!=t(z)){return z;}if(dc(z)){return z;}
+  if(34!=t(z)){return z;}if(dc(z)){return z;}
   B aa=ia(a),aw=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);
   if(aw){return aa?a:qi(a,ra(w));}
   z=vn(t(a),ls(a),nz);
@@ -507,20 +507,20 @@ Q sb_aa(Q a,Q w){return a-w;}
 Q bn_aa(Q w){return ~w;}
 Q ng_aa(Q w){return -w;}
 
-Q pl(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
-Q ml(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,ml_aa);}
-Q mn(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,mn_aa);}
-Q mx(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,mx_aa);}
-Q eq(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,eq_aa);}
-Q lt(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,lt_aa);}
-Q gt(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,gt_aa);}
-Q nd(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,an_aa);}
-Q or(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,or_aa);}
-Q xr(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,xr_aa);}
-Q sb(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,sb_aa);}
+Q pl(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
+Q ml(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,ml_aa);}
+Q mn(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,mn_aa);}
+Q mx(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,mx_aa);}
+Q eq(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,eq_aa);}
+Q lt(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,lt_aa);}
+Q gt(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,gt_aa);}
+Q nd(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,an_aa);}
+Q or(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,or_aa);}
+Q xr(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,xr_aa);}
+Q sb(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,sb_aa);}
 
-Q bn(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math_m(w,bn_aa);}
-Q ng(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(18!=t(z)){return z;}if(dc(z)){return z;}; return math_m(w,ng_aa);}
+Q bn(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math_m(w,bn_aa);}
+Q ng(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math_m(w,ng_aa);}
 
 Q set(Q a,Q w,D sp){
   dkv(SC[sp],a,w);
@@ -591,7 +591,7 @@ Q eoc(Q** q){
   SP++;D csp=SP;                                                            // cache the SP of this new allocation, return that.
   SC[SP] = dn(0,3,0);                                                       // Allocate new dictionary for the new scope
   E(q,'}');                                                               // Evaluate the inner expression
-  //if(**q && 18==t(**q) && dc(**q)=='}'){ printf("eoc advanced past }\n");(*q)++;}
+  //if(**q && 34==t(**q) && dc(**q)=='}'){ printf("eoc advanced past }\n");(*q)++;}
   return SC[csp];                                                           // Return the created dictionary
 }
 
@@ -603,14 +603,14 @@ Q eol(Q** q){
   LP++;D clp=LP;
   NL[LP] = vc(0,3,64,0);
   E(q,')');
-  //if(**q && 18==t(**q) && dc(**q)==')'){printf("eol advanced past )\n"); (*q)++; }// if we landed on ')' advance theh pointer by 1 at the end.
+  //if(**q && 34==t(**q) && dc(**q)==')'){printf("eol advanced past )\n"); (*q)++; }// if we landed on ')' advance theh pointer by 1 at the end.
   return NL[clp];
 }
 Q ecl(Q** q){Q l=NL[LP];if(LP > 0) LP--;return l;}
 
 Q emv(Q** q){
   Q v=*(*q)++;
-  while(10==t(**q)){v=av(dv(v)*6+(da(*(*q)++)-1)+32);}
+  while(18==t(**q)){v=av(dv(v)*6+(da(*(*q)++)-1)+32);}
   Q w=e(q);
   if(4==t(w)){Q p=tsn(4,1,3,1);pid(p,0,v);return ca(0,av(8),p,w);}
   Q r=dispatch_monad(v,w);
@@ -619,7 +619,7 @@ Q emv(Q** q){
 
 Q edv(Q a,Q** q){
   D current_sp = SP;Q v=*(*q)++;
-  while(10==t(**q)){v=av(dv(v)*6+(da(*(*q)++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
+  while(18==t(**q)){v=av(dv(v)*6+(da(*(*q)++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q);
   if(4==t(w)&&(7!=dv(v))){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
   a=((1==t(a))&&(7!=dv(v)))?dk(SC[current_sp],a):a;
@@ -630,14 +630,14 @@ Q edv(Q a,Q** q){
 
 Q E(Q** q, C tc){
   Q r = 0;D clp=LP;
-  while(**q && !(18==t(**q)&&tc==dc(**q))){
+  while(**q && !(34==t(**q)&&tc==dc(**q))){
     r=e(q);
     if(tc==')'){Q l=NL[clp];D idx=n(l);xn(l,1);zid(l,idx,r);}
-    while(**q && !(18==t(**q) && dc(**q)==';')) { // Find the end of the evaluated expression
-      if(18==t(**q) && tc==dc(**q)){printf("early return found %c %d\n",tc,clp);(*q)++;return r;}    // if we find the ending character then break from the loop without advancing past that character
+    while(**q && !(34==t(**q) && dc(**q)==';')) { // Find the end of the evaluated expression
+      if(34==t(**q) && tc==dc(**q)){printf("early return found %c %d\n",tc,clp);(*q)++;return r;}    // if we find the ending character then break from the loop without advancing past that character
       (*q)++; 
     }                           
-    if(**q && 18==t(**q) && ';'==dc(**q)){(*q)++;}  // advance past ; if it was encountered                                                             // If we found a semicolon, skip it to start the next expression
+    if(**q && 34==t(**q) && ';'==dc(**q)){(*q)++;}  // advance past ; if it was encountered                                                             // If we found a semicolon, skip it to start the next expression
   }
   return r;
 }
@@ -645,7 +645,7 @@ Q E(Q** q, C tc){
 Q e(Q** q){
   Q a=**q;
   if(!a){return tsn(4,1,3,0);}                                  // If a is the end of the stream then we must have missing data. return type 4
-  if(18==t(a)){
+  if(34==t(a)){
     if('{'==dc(a)){a=eoc(q);}
     if('}'==dc(a)){a=ecc(q);}
     if('('==dc(a)){a=eol(q);}
@@ -653,9 +653,9 @@ Q e(Q** q){
     if(';'==dc(a)) return tsn(4,1,3,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
   }
   Q w=(*q)[1];                                                     // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
-  B endexpr = !w || (18==t(w) && dc(w)==';');                    // end of expression is null or semicolon or }
-  B endscope = w && (18==t(w) && dc(w)=='}');                    // end of scope is }
-  B endlist = w && (18==t(w) && dc(w)==')');                    // end of list is )
+  B endexpr = !w || (34==t(w) && dc(w)==';');                    // end of expression is null or semicolon or }
+  B endscope = w && (34==t(w) && dc(w)=='}');                    // end of scope is }
+  B endlist = w && (34==t(w) && dc(w)==')');                    // end of list is )
   B end = endexpr || endscope || endlist;
   if(endscope){ecc(q);}
   if(endlist){ecl(q);}

@@ -56,26 +56,30 @@ How do each of the explored areas overlap?
 This interpreter is essentially an abstract machine. It works off of a Q (quadword/64bit) register size.
  A Q has different representations based on the metadata stored in the lower bits. 
  The system assumes the smallest possible alignment is 16 byte alignment. 
-  This means that any pointer type object will have 4 free low bits. 3 are currently in use.
-  Those 3 low bits are used to encode a type tag
+  This means that any pointer type object will have 4 free low bits.
+  Those 4 low bits are used to encode a type tag
    0 - pointer like object
    1 - reference
    2 - grammatical
+    2 - verbs
+    18 - adverbs
+    34 - control (todo split out control characters for errors at runtime from grammatical objects like (){}[])
    3 - number
    4 - partial evaluation. never atom (eventually move this into grammatical?)
    5 - hash. never atom.
-   6 - unused
+   6 - character
    7 - symbol
+   8 - file (todo)
   the metadata in a Q is type dependent (p:payload,f:fileid,a:arenaid,o:order,t:typetag). Data is organized into arenas 0-7
    0 -
     file backed 
-     2 - (read only file backed snapshot) 58p3a3t
-     3 - (many small files, still needs thought) 37p16f3a5o3t
-    ram backed (a in 0..6) 53p3a5o3t
-     0 - (temp allocations) 58p3a3t
-     1 - (global allocations) 53p5o3a3t
-   1,3,7 - 61p3t
-   2 - 59p2t3t (there are 2 more bits worth of subtypes for the grammatical types with low bits == 2)
+     2 - (read only file backed snapshot) 57p3a4t
+     3 - (many small files, still needs thought) 36p16f3a5o4t
+    ram backed (a in 0..6) 52p3a5o4t
+     0 - (temp allocations) 57p3a4t
+     1 - (global allocations) 52p5o3a4t
+   1,3,7 - 60p4t
+   2 - 58p2t4t (there are 2 more bits worth of subtypes for the grammatical types with low bits == 2)
 the arena portion of a Q is a way for the system to find the base address used to calculate the true pointer to that Q
 the payload part of the Q constitutes the offset. 
  The offset is stored in units of the minimum allocation granularity for that arenas allocator

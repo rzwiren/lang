@@ -816,18 +816,11 @@ Q pn(C* s, D len){
 }
 Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
   while(st!=7){
-    if(*p=='-'&&p[1]=='>'){q[qi++]=aa(FA("→"));p+=2;st=0;continue;}
-    if(*p=='<'&&p[1]=='-'){q[qi++]=aa(FA("←"));p+=2;st=0;continue;}
-    if(*p=='<'&&p[1]=='o'){q[qi++]=aa(FA("↺"));p+=2;st=0;continue;}
-    if(*p=='o'&&p[1]=='>'){q[qi++]=aa(FA("↻"));p+=2;st=0;continue;}
-    if(*p=='<'&&p[1]=='\''){q[qi++]=aa(FA("↰"));p+=2;st=0;continue;}
-    if(*p=='\''&&p[1]=='>'){q[qi++]=aa(FA("↱"));p+=2;st=0;continue;}
-    if(*p=='\''&&p[1]=='v'){q[qi++]=aa(FA("↓"));p+=2;st=0;continue;}
-    if(*p=='\''&&p[1]=='^'){q[qi++]=aa(FA("↑"));p+=2;st=0;continue;}
-    if(*p=='/'&&p[1]=='\''){q[qi++]=aa(FA("↿"));p+=2;st=0;continue;}
-    if(*p=='\\'&&p[1]=='\''){q[qi++]=aa(FA("⇃"));p+=2;st=0;continue;}
-    if(*p=='<'&&p[1]=='p'){q[qi++]=aa(FA("↫"));p+=2;st=0;continue;}
-    if(*p=='p'&&p[1]=='>'){q[qi++]=aa(FA("↬"));p+=2;st=0;continue;}
+    if((B)*p==0xE2){
+      C t[4];t[0]=p[0];t[1]=p[1];t[2]=p[2];t[3]=0;
+      D ai=FA(t);
+      if(ai){q[qi++]=aa(ai);p+=3;st=0;continue;}
+    }
     C*s=p;D cc=cl(*p);st=TT[0][cc]; // s:token start
     if(st==0){p++;continue;} // whitespace
     if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(FA(ts));p++;st=0;continue;} // verbs, controls, adverbs
@@ -854,9 +847,32 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
   q[qi]=0;return q;
 }
 
+C* sub(C* s){
+  static C b[256];
+  C* d=b; C* p=s;
+  while(*p){
+    if(p[0]=='-'&&p[1]=='>'){strcpy(d,"→");d+=3;p+=2;}
+    else if(p[0]=='<'&&p[1]=='-'){strcpy(d,"←");d+=3;p+=2;}
+    else if(p[0]=='<'&&p[1]=='o'){strcpy(d,"↺");d+=3;p+=2;}
+    else if(p[0]=='o'&&p[1]=='>'){strcpy(d,"↻");d+=3;p+=2;}
+    else if(p[0]=='<'&&p[1]=='\''){strcpy(d,"↰");d+=3;p+=2;}
+    else if(p[0]=='\''&&p[1]=='>'){strcpy(d,"↱");d+=3;p+=2;}
+    else if(p[0]=='\''&&p[1]=='v'){strcpy(d,"↓");d+=3;p+=2;}
+    else if(p[0]=='\''&&p[1]=='^'){strcpy(d,"↑");d+=3;p+=2;}
+    else if(p[0]=='/'&&p[1]=='\''){strcpy(d,"↿");d+=3;p+=2;}
+    else if(p[0]=='\\'&&p[1]=='\''){strcpy(d,"⇃");d+=3;p+=2;}
+    else if(p[0]=='<'&&p[1]=='p'){strcpy(d,"↫");d+=3;p+=2;}
+    else if(p[0]=='p'&&p[1]=='>'){strcpy(d,"↬");d+=3;p+=2;}
+    else {*d++=*p++;}
+  }
+  *d=0;
+  return b;
+}
+
 C buffer[100];
 D main(void){
 #if defined(_MSC_VER)
+  SetConsoleOutputCP(65001);
   AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
   AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){printf("VA 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #else
@@ -879,7 +895,9 @@ D main(void){
       }
       AI[0]=0;SC[0]=dni(0,3,0,0); SP=0; 
      } // reset THI only if evaluation takes us back to the global scope. 
-    Q* tokens = lx(buffer);
+    C* s=sub(buffer);
+    printf("\033[A\033[2K %s\n",s);
+    Q* tokens = lx(s);
     Q r=E(&tokens,'\0');
     pr(r);printf("\n");
   }

@@ -17,8 +17,7 @@ typedef Q(*RDO)(Q,Q);                                                           
 typedef Q(*RMO)(Q);                                                             // function pointer for raw monadic operation
 typedef Q(*DV)(B,Q,Q,Q);                                                        // function pointer for dyadic verb (arena;verb;alpha;omega)
 typedef Q(*MV)(B,Q,Q);                                                          // function pointer for monadic verb (arena;verb;omega)
-typedef Q(*DAV)(B,Q,Q,Q);                                                       // function pointer for dyadic adverb (arena;verb;alpha;omega)
-typedef Q(*MAV)(B,Q,Q);                                                         // function pointer for monadic adverb (arena;verb;omega)
+typedef Q(*ADV)(B,Q,Q,Q);                                                       // function pointer for adverb (arena;verb;alpha;omega)
 
 #define BUMP_UNIT_BYTES   16
 #define BUDDY_UNIT_BYTES  4096
@@ -360,7 +359,7 @@ Q t2g(Q q){
   return g;
 }
 #define VTZ 19
-#define ATZ 7
+#define ATZ 15
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
@@ -538,47 +537,144 @@ Q ca(B A,Q v,Q a,Q w){
 Q el(B A,Q v,Q a,Q w){return vb(A,v,a,w,LB,1);}
 Q er(B A,Q v,Q a,Q w){return vb(A,v,a,w,RB,1);}
 Q ed(B A,Q v,Q a,Q w){return vb(A,v,a,w,DB,1);}
-Q em(B A,Q v,Q w){return vb(A,v,0,w,MB,1);}
-Q ov(B A,Q v,Q w){
+Q em(B A,Q v,Q a,Q w){return vb(A,v,0,w,MB,1);}
+Q ov(B A,Q v,Q a,Q w){
   if(0==sh(w))return dispatch_monad(v,w);
-  D nw=n(w);if(0==nw){printf("ov empty\n");return ac(2);}
-  Q a=qi(w,0);
-  for(D i=1;i<nw;i++){a=dispatch_dyad(v,a,qi(w,i));}
-  return a;
+  D nw=n(w);if(0==nw){if(a)return a;printf("ov empty\n");return ac(2);}
+  Q acc;D i=0;
+  if(a){acc=a;}else{acc=qi(w,0);i=1;}
+  for(;i<nw;i++){acc=dispatch_dyad(v,acc,qi(w,i));}
+  return acc;
 }
-Q sc(B A,Q v,Q w){
+Q sc(B A,Q v,Q a,Q w){
   if(0==sh(w))return dispatch_monad(v,w);
+  D nw=n(w);D zn=a?nw+1:nw;Q z=ln(zn);
+  Q acc;D i=0;D j=0;
+  if(a){acc=a;zid(z,j++,acc);}else{acc=qi(w,0);zid(z,j++,acc);i=1;}
+  for(;i<nw;i++){acc=dispatch_dyad(v,acc,qi(w,i));zid(z,j++,acc);}
+  return z;
+}
+Q lfa(B A,Q v,Q a,Q w){
+  if(ia(w))return a?dispatch_dyad(v,a,w):dispatch_monad(v,w);
   D nw=n(w);Q z=ln(nw);
-  Q a=qi(w,0);zid(z,0,a);
-  for(D i=1;i<nw;i++){a=dispatch_dyad(v,a,qi(w,i));zid(z,i,a);}
+  for(D i=0;i<nw;i++){
+    Q wi=qi(w,i);
+    Q r=lfa(A,v,a,wi);
+    zid(z,i,r);
+  }
+  return z;
+}
+Q lvs(B A,Q v,Q a,Q w){
+  if(a)return ac(2);
+  Q h=dispatch_monad(v,w);
+  if(ia(w)){Q z=ln(1);zid(z,0,h);return z;}
+  D nw=n(w);
+  Q s=ln(nw);
+  D md=0;
+  for(D i=0;i<nw;i++){
+    pid(s,i,lvs(A,v,0,qi(w,i)));
+    D d=n(pi(s,i));
+    if(d>md)md=d;
+  }
+  Q z=ln(1+md);
+  zid(z,0,h);
+  for(D d=0;d<md;d++){
+    Q r=ln(nw);
+    for(D i=0;i<nw;i++){
+      Q si=pi(s,i);D sn=n(si);
+      Q val=qi(si,d<sn?d:sn-1);
+      zid(r,i,val);
+    }
+    zid(z,d+1,r);
+  }
+  for(D i=0;i<nw;i++)dr(pi(s,i));
+  return z;
+}
+Q lvl(B A,Q v,Q a,Q w){
+  if(!a)return dispatch_monad(v,w);
+  D d=di(a);
+  if(0==d)return dispatch_monad(v,w);
+  if(ia(w))return dispatch_monad(v,w);
+  D nw=n(w);Q z=ln(nw);
+  for(D i=0;i<nw;i++){
+    Q r=lvl(A,v,an(d-1),qi(w,i));
+    zid(z,i,r);
+  }
+  return z;
+}
+Q lsl(B A,Q v,Q a,Q w){
+  D limit=a?di(a):0;
+  Q h=dispatch_monad(v,w);
+  if(0==limit||ia(w)){Q z=ln(1);zid(z,0,h);return z;}
+  D nw=n(w);
+  Q s=ln(nw);
+  D md=0;
+  for(D i=0;i<nw;i++){
+    pid(s,i,lsl(A,v,an(limit-1),qi(w,i)));
+    D d=n(pi(s,i));
+    if(d>md)md=d;
+  }
+  Q z=ln(1+md);
+  zid(z,0,h);
+  for(D d=0;d<md;d++){
+    Q r=ln(nw);
+    for(D i=0;i<nw;i++){
+      Q si=pi(s,i);D sn=n(si);
+      Q val=qi(si,d<sn?d:sn-1);
+      zid(r,i,val);
+    }
+    zid(z,d+1,r);
+  }
+  for(D i=0;i<nw;i++)dr(pi(s,i));
+  return z;
+}
+Q itr(B A,Q v,Q a,Q w){
+  if(!a)return ac(2);
+  D n=di(a);
+  Q r=w;
+  for(D i=0;i<n;i++){
+    Q next=dispatch_monad(v,r);
+    if(r!=w && r!=next)dr(r);
+    r=next;
+  }
+  return r;
+}
+Q its(B A,Q v,Q a,Q w){
+  if(!a)return ac(2);
+  D n=di(a);
+  Q z=ln(n+1);
+  Q r=w;
+  zid(z,0,r);
+  for(D i=0;i<n;i++){
+    r=dispatch_monad(v,r);
+    zid(z,i+1,r);
+  }
   return z;
 }
 
 DV VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb};
 MV VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng};
 C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
-DAV AVD[ATZ]={0,er,el,ed,ed,er,el};
-MAV AVM[ATZ]={0,ov,sc,em,em,ov,sc};
-C* AT[ATZ]={" ","/","\\","'","each","over","scan"};
+ADV AVD[ATZ]={0,0 ,ed,0 ,0 ,el,er,0  ,0  ,0,0,lvl,lsl,itr,its};
+ADV AVM[ATZ]={0,em,0 ,sc,ov,0 ,0 ,lvs,lfa,0,0,0  ,0  ,0  ,0  };
+C* AT[ATZ]={" ","'","T","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
 
 Q dispatch_monad(Q v,Q w){
   Q r=dv(v);
   if(r<32)return VM[r](0,v,w);
-  D c=(r-32)%6;Q b=av((r-32)/6);
-  if(2==c)return em(0,b,w);        // each
-  if(1==c)return sc(0,b,w);        // scan
-  if(0==c)return ov(0,b,w);        // over
-  printf("dispatch_monad busted c:%d\n",c);
+  D c=(r-32)%15;Q b=av((r-32)/15);
+  D idx=c+1;
+  if(AVM[idx])return AVM[idx](0,b,0,w);
+  if(AVD[idx])return ac(2); // projection not implemented
   return ac(2);
 }
 Q dispatch_dyad(Q v,Q a,Q w){
   Q r=dv(v);
   if(r<32)return VD[r](0,v,a,w);
-  D c=(r-32)%6;Q b=av((r-32)/6);
-  if(2==c)return ed(0,b,a,w);      // each
-  if(1==c)return el(0,b,a,w);      // eachleft
-  if(0==c)return er(0,b,a,w);      // eachright
-  printf("dispatch_dyad busted c:%d\n",c);
+  D c=(r-32)%15;Q b=av((r-32)/15);
+  D idx=c+1;
+  if(AVD[idx])return AVD[idx](0,b,a,w);
+  if(AVM[idx])return AVM[idx](0,b,a,w);
   return ac(2);
 }
 
@@ -610,7 +706,7 @@ Q ecl(Q** q){Q l=NL[LP];if(LP > 0) LP--;return l;}
 
 Q emv(Q** q){
   Q v=*(*q)++;
-  while(18==t(**q)){v=av(dv(v)*6+(da(*(*q)++)-1)+32);}
+  while(18==t(**q)){v=av(dv(v)*15+(da(*(*q)++)-1)+32);}
   Q w=e(q);
   if(4==t(w)){Q p=tsn(4,1,3,1);pid(p,0,v);return ca(0,av(8),p,w);}
   Q r=dispatch_monad(v,w);
@@ -619,7 +715,7 @@ Q emv(Q** q){
 
 Q edv(Q a,Q** q){
   D current_sp = SP;Q v=*(*q)++;
-  while(18==t(**q)){v=av(dv(v)*6+(da(*(*q)++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
+  while(18==t(**q)){v=av(dv(v)*15+(da(*(*q)++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q);
   if(4==t(w)&&(7!=dv(v))){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
   a=((1==t(a))&&(7!=dv(v)))?dk(SC[current_sp],a):a;
@@ -694,8 +790,10 @@ Q parse_b(C* s, D len, D base){
 // CClass(cc):0-nul,1-spc,2-alp,3-dig,4-dot,5-qot,6-bqt,7-ver,8-ctl,9-adv,10-oth,11-neg
 // Character class lookup table. Maps ASCII chars ' ' (32) to '~' (126) to a class index.
 //              !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
+// static C* CST="1757AA7988777B49333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
+// D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
 static C* CST="1757AA7988777B49333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
-D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
+D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc>=128)return 4;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
 D TT[9][12]={ // Transition Table
   // NUL SPC ALP DIG DOT QOT BQT VER CTL ADV OTH NEG
     {7,  0,  4,  2,  4,  5,  6,  7,  7,  7,  7,  1}, // 0 S_START
@@ -718,6 +816,18 @@ Q pn(C* s, D len){
 }
 Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
   while(st!=7){
+    if(*p=='-'&&p[1]=='>'){q[qi++]=aa(FA("→"));p+=2;st=0;continue;}
+    if(*p=='<'&&p[1]=='-'){q[qi++]=aa(FA("←"));p+=2;st=0;continue;}
+    if(*p=='<'&&p[1]=='o'){q[qi++]=aa(FA("↺"));p+=2;st=0;continue;}
+    if(*p=='o'&&p[1]=='>'){q[qi++]=aa(FA("↻"));p+=2;st=0;continue;}
+    if(*p=='<'&&p[1]=='\''){q[qi++]=aa(FA("↰"));p+=2;st=0;continue;}
+    if(*p=='\''&&p[1]=='>'){q[qi++]=aa(FA("↱"));p+=2;st=0;continue;}
+    if(*p=='\''&&p[1]=='v'){q[qi++]=aa(FA("↓"));p+=2;st=0;continue;}
+    if(*p=='\''&&p[1]=='^'){q[qi++]=aa(FA("↑"));p+=2;st=0;continue;}
+    if(*p=='/'&&p[1]=='\''){q[qi++]=aa(FA("↿"));p+=2;st=0;continue;}
+    if(*p=='\\'&&p[1]=='\''){q[qi++]=aa(FA("⇃"));p+=2;st=0;continue;}
+    if(*p=='<'&&p[1]=='p'){q[qi++]=aa(FA("↫"));p+=2;st=0;continue;}
+    if(*p=='p'&&p[1]=='>'){q[qi++]=aa(FA("↬"));p+=2;st=0;continue;}
     C*s=p;D cc=cl(*p);st=TT[0][cc]; // s:token start
     if(st==0){p++;continue;} // whitespace
     if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(FA(ts));p++;st=0;continue;} // verbs, controls, adverbs

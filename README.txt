@@ -73,13 +73,13 @@ This interpreter is essentially an abstract machine. It works off of a Q (quadwo
   the metadata in a Q is type dependent (p:payload,f:fileid,a:arenaid,o:order,t:typetag). Data is organized into arenas 0-7
    0 -
     file backed 
-     2 - (read only file backed snapshot) 57p3a4t
-     3 - (many small files, still needs thought) 36p16f3a5o4t
-    ram backed (a in 0..6) 52p3a5o4t
-     0 - (temp allocations) 57p3a4t
+     2 - (read only file backed snapshot) 58p2a4t
+     3 - (many small files, still needs thought) 37p16f2a5o4t
+    ram backed (a in 0..6) 53p5o2a4t
+     0 - (temp allocations) 58p2a4t
      1 - (global allocations) 52p5o3a4t
    1,3,7 - 60p4t
-   2 - 58p2t4t (there are 2 more bits worth of subtypes for the grammatical types with low bits == 2)
+   2 - 58p2a4t (there are 2 more bits worth of subtypes for the grammatical types with low bits == 2)
 the arena portion of a Q is a way for the system to find the base address used to calculate the true pointer to that Q
 the payload part of the Q constitutes the offset. 
  The offset is stored in units of the minimum allocation granularity for that arenas allocator

@@ -29,18 +29,18 @@ typedef Q(*ADV)(B,Q,Q,Q);                                                       
 #define BUDDY_UNIT_QS  (BUDDY_UNIT_BYTES / sizeof(Q))
 
 #define ARENA_SZ       (1ULL<<32)
-Q* AB[8];Q AI[8];Q AC[8];
-Q AM[8];
-Q AQ[8]={BUMP_UNIT_QS,BUDDY_UNIT_QS,BUMP_UNIT_QS,0,0,0,0,0};
+Q* AB[4];Q AI[4];Q AC[4];
+Q AM[4];
+Q AQ[4]={BUMP_UNIT_QS,BUDDY_UNIT_QS,BUMP_UNIT_QS,0};
 Q BF[32];
-B ha(Q q){return (q>>4)&7;}
+B ha(Q q){return (q>>4)&3;}
 typedef struct { void* addr; Q sz; Q cap; Q h; } FI;
 FI FT[4096]; D FT_n=0;
-Q hp(B a,Q q){return q>>(0==a?7:1==a?12:7);}
+Q hp(B a,Q q){return q>>(0==a?6:1==a?11:6);}
 Q* ptr(Q q){
   B a=ha(q);
   if(a==2){
-    Q off = (q>>7) & 0x1FFFFFFFFF;
+    Q off = (q>>6) & 0x3FFFFFFFFF;
     D fid = q>>44;
     return (Q*)FT[fid].addr + (off*AQ[a]);
   }
@@ -151,7 +151,7 @@ Q bumpalloc(B t,B s,B z,D n,D c,B a){
   AI[0]+=units;
   ah(o,t,s,z,0,n,c);
   memset(o+6,0,pz(z,c));
-  return (off<<7)|(0<<4);
+  return (off<<6)|(0<<4);
 }
 void bumpfree(B a){AI[a]=0;}
 void buddyinit(B a){
@@ -199,12 +199,12 @@ Q buddyalloc(B t,B s,B z,D n,D c,B a){
   ah(o,t,s,z,0,n,c);
   memset(o+6, 0, pz(z,c));
 
-  return (off << 12) | (ord << 7) | (1 << 4) ;
+  return (off << 11) | (ord << 6) | (1 << 4) ;
 }
 void buddyfree(Q q){
   B a   = ha(q);
   Q off = hp(a,q);
-  B ord = (q>>7)&31;
+  B ord = (q>>6)&31;
   while(ord<31){
     Q u = buddy_units_from_order(ord);
     Q b = off ^ u;
@@ -380,7 +380,7 @@ Q cp2f(Q q, Q* base, Q* off){
   *off += szq;
   Q* dst = (Q*)((B*)base + my_off);
   ah(dst, t(q), sh(q), ls(q), 0, n(q), c);
-  Q h = (my_off >> 4) << 7 | (2 << 4) | (q & 15);
+  Q h = (my_off >> 4) << 6 | (2 << 4) | (q & 15);
   if(sh(q)==1){
     if(t(q)==0){
       for(D i=0; i<n(q); i++){
@@ -507,7 +507,7 @@ Q apnd(B A, Q v, Q a, Q w){
     Q* r_ptr = 0;
 
     if(root != 0){
-      Q r_off = (root >> 7) & 0x1FFFFFFFFF;
+      Q r_off = (root >> 6) & 0x3FFFFFFFFF;
       r_ptr = (Q*)((B*)f->addr + r_off*16);
       if(r_ptr[0] != 0) return ac(2); // Only append to generic lists
       n = r_ptr[4];
@@ -529,7 +529,7 @@ Q apnd(B A, Q v, Q a, Q w){
     ah(rh, 0, 1, 3, 0, new_n, c);
     if(n > 0) memcpy(rh+6, r_ptr+6, n*8);
     rh[6+n] = h;
-    new_root = (offset >> 4) << 7 | (2 << 4) | 0;
+    new_root = (offset >> 4) << 6 | (2 << 4) | 0;
     offset += sz;
 
     f->sz = offset;
@@ -591,7 +591,7 @@ Q apnd(B A, Q v, Q a, Q w){
     Q* r_ptr = 0;
 
     if(root != 0){
-      Q r_off = (root >> 7) & 0x1FFFFFFFFF;
+      Q r_off = (root >> 6) & 0x3FFFFFFFFF;
       r_ptr = (Q*)((B*)map_base + r_off*16);
       if(r_ptr[0] != 0) return ac(2);
       n = r_ptr[4];
@@ -611,7 +611,7 @@ Q apnd(B A, Q v, Q a, Q w){
     ah(rh, 0, 1, 3, 0, new_n, c);
     if(n > 0) memcpy(rh+6, r_ptr+6, n*8);
     rh[6+n] = h;
-    new_root = (offset >> 4) << 7 | (2 << 4) | 0;
+    new_root = (offset >> 4) << 6 | (2 << 4) | 0;
     offset += rsz;
 
     *((Q*)map_base + 1) = offset;

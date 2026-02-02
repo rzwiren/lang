@@ -34,15 +34,15 @@ Q AM[4];
 Q AQ[4]={BUMP_UNIT_QS,BUDDY_UNIT_QS,BUMP_UNIT_QS,0};
 Q BF[32];
 B ha(Q q){return (q>>4)&3;}
-typedef struct { void* addr; Q sz; Q cap; Q h; } FI;
-FI FT[4096]; D FT_n=0;
+Q FT_addr=0, FT_sz=0, FT_cap=0, FT_h=0, FT_fn=0;
 Q hp(B a,Q q){return q>>(0==a?6:1==a?11:6);}
+Q pi(Q q,D i);
 Q* ptr(Q q){
   B a=ha(q);
   if(a==2){
     Q off = (q>>6) & 0x3FFFFFFFFF;
     D fid = q>>44;
-    return (Q*)FT[fid].addr + (off*AQ[a]);
+    return ((Q*)pi(FT_addr,fid)) + (off*AQ[a]);
   }
   return AB[a]+(hp(a,q)*AQ[a]);
 }
@@ -64,7 +64,12 @@ Q ap(Q v){return (v<<4)|4;}                                                   //
                                                                               // type 5 is hash
 Q ach(C c){return ((Q)(B)c<<4)|6;}                                            // create an atom of type 6 (char)
 Q as(Q s){return (s<<4)|7;}                                                   // create an atom of type 7 (symbol)
-Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach(q):ac(q);} // encode data of an atom based on the type
+Q aA(B a, D f){return (((Q)f<<8)|a)<<4|9;}                                    // create an atom of type 9 (arena/file)
+Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach(q):ac(q);} // encode data of an atom based on the type. TODO: handle 9
+
+#define AR_ID(x) ((x)&0xFF)
+#define AR_FID(x) ((x)>>8)
+#define MK_AR(a, f) (((Q)(f)<<8)|(a))
 
 B ia(Q q){return !ip(q);}                                                     // is atom  from pointer
 B t(Q q){
@@ -121,8 +126,8 @@ static inline Q buddy_units(B z, D c){
   return (bytes + BUDDY_UNIT_BYTES - 1) / BUDDY_UNIT_BYTES;
 }
 static inline B buddy_order_from_units(Q units){
-  // monotone mapping, not semantically log2
-  return floor_ord(units);
+  if (units <= 1) return 0;
+  return floor_ord(units - 1) + 1;
 }
 
 static inline Q buddy_units_from_order(B ord){
@@ -138,7 +143,7 @@ static inline void commit_range(void* p, Q bytes){
   mprotect((void*)s, e-s, PROT_READ|PROT_WRITE);
 #endif
 }
-Q bumpalloc(B t,B s,B z,D n,D c,B a){                                                    
+Q bumpalloc(B t,B s,B z,D n,D c,Q ar){                                                    
   Q units=bump_units(z,c);
   if(AI[0]+units>AC[0]){printf("oom\n");exit(0);}
   if(AI[0]+units>AM[0]){
@@ -173,7 +178,7 @@ void buddyinit(B a){
     rem -= u;
   }
 }
-Q buddyalloc(B t,B s,B z,D n,D c,B a){
+Q buddyalloc(B t,B s,B z,D n,D c,Q ar){
   Q units = buddy_units(z,c);
   B ord   = buddy_order_from_units(units);
 
@@ -222,26 +227,73 @@ void buddyfree(Q q){
   *(Q*)(AB[a] + off * BUDDY_UNIT_QS) = BF[ord];
   BF[ord] = off;
 }
-Q tsng(B t,B s,B z,D n){return buddyalloc(t,s,z,n,cn(t,s,n),1);}
-Q tsn(B t,B s,B z,D n){return bumpalloc(t,s,z,n,cn(t,s,n),0);}
-Q vn(B t,B z,D n){return tsn(t,1,z,n);}
-Q ln(D n){return vn(0,3,n);}
-Q vc(B t,B z,D c,B a){return (a==1?buddyalloc:bumpalloc)(t,1,z,0,c,a);}
-Q lc(D c,B a){return vc(0,3,c,a);}
+void os_truncate(Q h, Q sz);
+void* os_remap(void* addr, Q old_cap, Q new_cap, Q h);
+Q filebumpalloc(B t, B s, B z, D n, D c, Q ar) {
+    D fid = AR_FID(ar);
+    Q* addrs = (Q*)p(FT_addr);
+    Q* szs   = (Q*)p(FT_sz);
+    Q* caps  = (Q*)p(FT_cap);
+    Q* hs    = (Q*)p(FT_h);
+
+    Q bytes_needed = az(z, c);
+    bytes_needed = (bytes_needed + 15) & ~15; // align to 16 bytes
+
+    Q current_sz_bytes = szs[fid];
+    Q current_cap_bytes = caps[fid];
+    Q new_sz = current_sz_bytes + bytes_needed;
+
+    if (new_sz > current_cap_bytes) {
+        Q new_cap = current_cap_bytes ? current_cap_bytes : (1ULL<<16);
+        while (new_cap < new_sz) new_cap *= 2;
+        void* new_addr = os_remap((void*)addrs[fid], current_cap_bytes, new_cap, hs[fid]);
+        if (!new_addr) { printf("file: grow failed\n"); return ac(2); }
+        addrs[fid] = (Q)new_addr;
+        caps[fid] = new_cap;
+    }
+
+    os_truncate(hs[fid], new_sz);
+
+    Q off_bytes = current_sz_bytes;
+    Q* o = (Q*)((B*)addrs[fid] + off_bytes);
+    ah(o, t, s, z, 0, n, c);
+    memset(o+6, 0, pz(z, c));
+
+    szs[fid] = new_sz; // update used size
+    *((Q*)addrs[fid] + 1) = szs[fid]; // Persist size in file header
+
+    Q off_units = off_bytes / 16;
+
+    B ptr_tag = 0;
+
+    return ((Q)fid << 44) | (off_units << 6) | (2 << 4) | ptr_tag;
+}
+
+Q tsna(Q ar, B t, B s, B z, D n, D c){
+  B a = AR_ID(ar);
+  if(a==2) return filebumpalloc(t,s,z,n,c,ar);
+  if(a==1) return buddyalloc(t,s,z,n,c,ar);
+  return bumpalloc(t,s,z,n,c,ar);
+}
+Q vna(Q ar, B t, B z, D n){ return tsna(ar, t, 1, z, n, cn(t,1,n)); }
+Q lna(Q ar, D n){ return vna(ar, 0, 3, n); }
+Q vca(Q ar, B t, B z, D c){ return tsna(ar, t, 1, z, 0, c); }
+Q lca(Q ar, D c){ return vca(ar, 0, 3, c); }
+Q ln(D n){return vna(0,0,3,n);}
 
 void pr(Q q);
 void zid(Q q,D i,Q d);
-Q dni(B t,B z,D n,B a){                                                              // alloc a dictionary of a certain type and element size with hash table capacity n. 
+Q dni(B t,B z,D n,Q ar){                                                              // alloc a dictionary of a certain type and element size with hash table capacity n. 
   D c=cn(5,1,n);
-  Q h=vc(5,2,c,a);                                                                   // n means keycount for hash.
-  Q k=lc(c,a);
-  Q v=vc(t,z,c,a);
-  Q d=(a==1?buddyalloc:bumpalloc)(0,2,3,3,3,a);
+  Q h=vca(ar, 5, 2, c);                                                                   // n means keycount for hash.
+  Q k=lca(ar, c);
+  Q v=vca(ar, t, z, c);
+  Q d=tsna(ar, 0, 2, 3, 3, 3);
   zid(d,0,h);zid(d,1,k);zid(d,2,v);
   return d;
 }
-Q dn(B t,B z,D n){return dni(t,z,n,0);}
-Q dnu(B t,B z,D n){return bumpalloc(0,2,3,3,3,0);}
+Q dn(B t,B z,D n,Q ar){return dni(t,z,n,ar);}
+Q dnu(B t,B z,D n,B a){return tsna(a,0,2,3,3,3);}
 // varwidth getters
 Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                               // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}              
@@ -257,22 +309,25 @@ Q qi(Q q,D i){B s=sh(q),tq=t(q);
 }              // get at index, return tagged Q
 Q ra(Q q){                                                                      // read atom
   if(sh(q)){printf("ra: not an atom\n");return ac(1);}
+  // Heap atoms store their payload in element 0; tagged atoms store it in the tag bits.
+  Q payload = ip(q) ? pi(q,0) : di(q);
   switch(t(q)){
-    case 1:  return di(q);
-    case 2:  return dv(q);
-    case 3:  return di(q);                                                       // enhance for heap allocated 64 bit num.
-    case 7:  return di(q);
-    case 6:  return di(q);
-    case 18: return da(q);
-    case 34: return dc(q);
+    case 1:  return payload;
+    case 2:  return payload;                                                     // verbs are atoms; payload is the verb id
+    case 3:  return payload;
+    case 7:  return payload;
+    case 6:  return payload;
+    case 18: return payload;
+    case 34: return payload;
+    case 8:  return payload;                                                     // needs type 9 here
     default: return ac(5);                                                      // not yet implemented
   }
 }
-Q grow(Q q,D n,D c,D m){printf("growing\n");return ac(5);}                      // not yet implemented but, given a q, old length n, old capacity c, and amount of new items to add, extend the allocation to a new c, set the proper n.
+Q grow(Q q,D n,D c,D m){printf("growing\n");exit(1);return ac(5);}                      // not yet implemented but, given a q, old length n, old capacity c, and amount of new items to add, extend the allocation to a new c, set the proper n.
 D xn(Q q,D m){                                                                  // if n(q)+m<c then set n to n+m otherwise grow
   D nq=n(q);D c=cp(q);
   printf("q t(q) nq m c %lld %d %d %d %d\n",q,t(q),nq,m,c);
-  if(nq+m<c){ptr(q)[4]=nq+m;}else{grow(q,nq,c,m);}
+  if(nq+m<=c){ptr(q)[4]=nq+m;}else{grow(q,nq,c,m);}
   return nq+m;
 }
 // varwidth setters
@@ -357,282 +412,342 @@ void dr(Q q){
   return;                                                                     // should I consider returning a control sentinel here (type)
 }
 Q t2g(Q q){
-  if(!itp(q)){return q;};
-  Q *h=ptr(q);Q g=tsng(h[0],h[1],h[2],h[4]);                                  // copy header, ignore refcount and capacity
-  if(1==sh(q)){
-    if(t(q)){memcpy(p(g),p(q),(1<<h[2])*h[4]);return g;}
-    for(D i=0;i<n(g);i++){Q v=qi(q,i);if(itp(v)){v=t2g(v);};zid(g,i,v);}
-  }
-  if(2==sh(q)){
-    zid(g,0,t2g(pi(q,0)));                                                    // copy hash
-    zid(g,1,t2g(pi(q,1)));                                                    // copy keys
-    zid(g,2,t2g(pi(q,2)));                                                    // copy values
-  }
-  
-  return g;
+  Q q2a(Q dest_ar, Q q);
+  return q2a(1, q);
 }
-Q cp2f(Q q, Q* base, Q* off){
-  if(!ip(q)) return q;
-  D c = cn(t(q), sh(q), n(q));
-  Q szq = az(ls(q), c);
-  szq = (szq + 15) & ~15;
-  Q my_off = *off;
-  *off += szq;
-  Q* dst = (Q*)((B*)base + my_off);
-  ah(dst, t(q), sh(q), ls(q), 0, n(q), c);
-  Q h = (my_off >> 4) << 6 | (2 << 4) | (q & 15);
-  if(sh(q)==1){
-    if(t(q)==0){
-      for(D i=0; i<n(q); i++){
-        dst[6 + i] = cp2f(qi(q,i), base, off);
-      }
-    } else {
-      memcpy(dst + 6, p(q), (1<<ls(q)) * n(q));
+
+Q q2a(Q dest_ar, Q q); // Forward declare
+
+static inline Q strip_fid(Q q){
+    if (ip(q) && ha(q) == 2) return q & ((1ULL << 44) - 1);
+    return q;
+}
+
+static inline Q atom_payload(Q q){
+    return ip(q) ? pi(q, 0) : di(q);
+}
+
+static inline Q heap_atom_from(Q dest_ar, Q q){
+    B tq = t(q);
+    B z = ip(q) ? ls(q) : (tq == 6 ? 0 : 3);
+    Q res = tsna(dest_ar, tq, 0, z, 1, 1);
+    pid(res, 0, atom_payload(q));
+    return res;
+}
+
+Q q2a_dict(Q dest_ar, Q q) {
+    // A dictionary is a list of 3 pointers: hash, keys, values
+    Q res = tsna(dest_ar, 0, 2, 3, 3, 3);
+
+    // Recursively materialize components
+    Q h = q2a(dest_ar, pi(q, 0));
+    Q k = q2a(dest_ar, pi(q, 1));
+    Q v = q2a(dest_ar, pi(q, 2));
+    if (AR_ID(dest_ar) == 2) { h = strip_fid(h); k = strip_fid(k); v = strip_fid(v); }
+    zid(res, 0, h); // hash
+    zid(res, 1, k); // keys
+    zid(res, 2, v); // values
+    return res;
+}
+
+Q q2a_list(Q dest_ar, Q q){
+    Q* h = ptr(q);
+    B t_q = h[0], s_q = h[1], l_q = h[2];
+    D n_q = h[4], c_q = h[5];
+    Q res = tsna(dest_ar, t_q, s_q, l_q, n_q, c_q);
+
+    if (t_q == 0) { // List of pointers
+        for (D i = 0; i < n_q; i++) {
+            // Recursively materialize each element
+            Q e = q2a(dest_ar, pi(q, i));
+            if (AR_ID(dest_ar) == 2) e = strip_fid(e);
+            zid(res, i, e);
+        }
+    } else { // List of values
+        memcpy(p(res), p(q), (1ULL << l_q) * n_q);
+    }
+    return res;
+}
+
+Q q2a(Q dest_ar, Q q) {
+    B dest_a = AR_ID(dest_ar);
+    D dest_fid = AR_FID(dest_ar);
+
+    if (!ip(q)) {
+        return (dest_a == 2) ? heap_atom_from(dest_ar, q) : q;
+    }
+
+    if (ha(q) == dest_a) {
+        if (dest_a != 2 || (q >> 44) == dest_fid) return q;
+    }
+
+    if (sh(q) == 0) return heap_atom_from(dest_ar, q);
+    if (sh(q) == 1) return q2a_list(dest_ar, q);
+    if (sh(q) == 2) return q2a_dict(dest_ar, q);
+    return q;
+} 
+
+
+void* os_map(char* fn, Q* sz, Q* h_out){
+  void* addr = 0;
+  int is_new = 0;
+#if defined(_MSC_VER)
+  HANDLE hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if(hf == INVALID_HANDLE_VALUE) {
+    hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if(hf != INVALID_HANDLE_VALUE){
+      is_new = 1;
+    }
+    if(hf == INVALID_HANDLE_VALUE) return 0;
+  } else { is_new = 0; }
+  LARGE_INTEGER li; GetFileSizeEx(hf, &li); *sz = li.QuadPart;
+  if(!*sz && is_new){ *sz=16; li.QuadPart=*sz; SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf); }
+  HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, 0, 0, NULL);
+  if(!hmap) { CloseHandle(hf); return 0; }
+  addr = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+  CloseHandle(hmap);
+  *h_out = (Q)hf;
+#else
+  int fd = open(fn, O_RDWR | O_CREAT, 0644);
+  if(fd < 0) return 0;
+  struct stat st; fstat(fd, &st); *sz = st.st_size;
+  if(!*sz){ is_new=1; *sz=16; ftruncate(fd, 16); } else { is_new = 0; }
+  addr = mmap(0, *sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if(addr == MAP_FAILED) { close(fd); return 0; }
+  *h_out = (Q)fd;
+#endif
+  if(is_new && addr && *sz >= 16) memset(addr, 0, 16);
+  return addr;
+}
+
+void os_unmap(D fid){
+  Q* addrs = (Q*)p(FT_addr);
+  Q* caps  = (Q*)p(FT_cap);
+  Q* hs    = (Q*)p(FT_h);
+  Q* szs   = (Q*)p(FT_sz);
+
+  if(!addrs[fid]) return;
+
+#if defined(_MSC_VER)
+  UnmapViewOfFile((void*)addrs[fid]);
+  CloseHandle((HANDLE)hs[fid]);
+#else
+  munmap((void*)addrs[fid], caps[fid]);
+  close((int)hs[fid]);
+#endif
+
+  addrs[fid] = 0;
+  hs[fid] = 0;
+  caps[fid] = 0;
+  szs[fid] = 0;
+  zid(FT_fn, fid, 0);
+}
+
+D find_empty_ft_slot(){
+  D idx = n(FT_addr);
+  for(D i=0; i<idx; i++){
+    if(pi(FT_addr, i) == 0) return i;
+  }
+  xn(FT_addr, 1);
+  xn(FT_sz, 1);
+  xn(FT_cap, 1);
+  xn(FT_h, 1);
+  xn(FT_fn, 1);
+  return idx;
+}
+
+void os_truncate(Q h, Q sz){
+#if defined(_MSC_VER)
+  HANDLE hf = (HANDLE)h;
+  LARGE_INTEGER li; li.QuadPart = sz;
+  SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf);
+#else
+  ftruncate((int)h, sz);
+#endif
+}
+
+void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
+#if defined(_MSC_VER)
+  UnmapViewOfFile(addr);
+  HANDLE hf = (HANDLE)h;
+  HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, (DWORD)(new_cap >> 32), (DWORD)new_cap, NULL);
+  if(!hmap) return 0;
+  addr = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+  CloseHandle(hmap);
+#else
+  munmap(addr, old_cap);
+  int fd = (int)h;
+  addr = mmap(0, new_cap, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+#endif
+  return addr;
+}
+
+Q ca(B A,Q v,Q a,Q w);
+
+Q file_append(Q a, Q w);
+Q file_log(Q a, Q w);
+Q file_read_log(Q f);
+
+Q fl(B A, Q v, Q w){
+  if(t(w)!=6){printf("file: filename must be string\n"); return ac(2);}
+  char fn[256]; D fn_len = n(w); if(fn_len > 255) fn_len = 255;
+  for(D i=0; i<fn_len; i++) fn[i] = (char)pi(w,i); fn[fn_len] = 0;
+
+  D idx = n(FT_addr);
+  D target_idx = -1;
+
+  // Find if file exists in table. If so, unmap it for reloading.
+  for(D i=0; i<idx; i++){
+    Q s = pi(FT_fn, i);
+    if(s != 0 && n(s) == fn_len && memcmp(p(s), fn, fn_len)==0) {
+      os_unmap(i);
+      target_idx = i;
+      break;
     }
   }
-  if(sh(q)==2){
-    dst[6] = cp2f(pi(q,0), base, off);
-    dst[7] = cp2f(pi(q,1), base, off);
-    dst[8] = cp2f(pi(q,2), base, off);
+
+  // If not found, find an empty slot.
+  if(target_idx == -1){
+    target_idx = find_empty_ft_slot();
   }
-  return h;
+
+  // Map the file.
+  Q sz=0, h=0;
+  void* map_base = os_map(fn, &sz, &h);
+  if(!map_base) { printf("file: map failed\n"); return ac(2); }
+
+  // Populate the slot.
+  Q used = *((Q*)map_base + 1);
+  if(used < 16) used = sz;
+  if(used < 16) used = 16; // Minimum header size
+
+  Q fn_q = vca(1, 6, 0, fn_len);
+  memcpy(p(fn_q), fn, fn_len);
+  ((Q*)p(FT_addr))[target_idx] = (Q)map_base;
+  ((Q*)p(FT_sz))[target_idx]   = used;
+  ((Q*)p(FT_cap))[target_idx]  = sz;
+  ((Q*)p(FT_h))[target_idx]    = h;
+  zid(FT_fn, target_idx, fn_q);
+
+  return aA(2, target_idx);
 }
+
 Q sv(B A, Q v, Q a, Q w){
   if(t(a)!=6){printf("save: filename must be string\n"); return ac(2);}
   char fn[256]; D fn_len = n(a); if(fn_len > 255) fn_len = 255;
   for(D i=0; i<fn_len; i++) fn[i] = (char)pi(a,i); fn[fn_len] = 0;
-  Q sz = ARENA_SZ; // Reserve 4GB
-  void* map_base = 0;
-#if defined(_MSC_VER)
-  HANDLE hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-  if(hf == INVALID_HANDLE_VALUE) { printf("save: create file failed\n"); return ac(2); }
-  LARGE_INTEGER li; li.QuadPart = sz;
-  SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf);
-  HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, 0, 0, NULL);
-  if(hmap == NULL) { CloseHandle(hf); printf("save: create mapping failed\n"); return ac(2); }
-  map_base = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-  if(map_base == NULL) { CloseHandle(hmap); CloseHandle(hf); printf("save: map view failed\n"); return ac(2); }
-#else
-  int fd = open(fn, O_RDWR | O_CREAT | O_TRUNC, 0644);
-  if(fd < 0) { printf("save: open failed\n"); return ac(2); }
-  if(ftruncate(fd, sz) < 0) { close(fd); printf("save: truncate failed\n"); return ac(2); }
-  map_base = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  if(map_base == MAP_FAILED) { close(fd); printf("save: mmap failed\n"); return ac(2); }
-#endif
-  Q offset = 16; // Start at 16 bytes to leave room for root pointer and alignment
-  Q h = cp2f(w, (Q*)map_base, &offset);
-  *(Q*)map_base = h; // Write root pointer at the beginning
-  *((Q*)map_base + 1) = offset; // Write used size
-#if defined(_MSC_VER)
-  FlushViewOfFile(map_base, 0); UnmapViewOfFile(map_base); CloseHandle(hmap);
-  li.QuadPart = offset;
-  SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf); CloseHandle(hf);
-#else
-  msync(map_base, sz, MS_SYNC); munmap(map_base, sz); ftruncate(fd, offset); close(fd);
-#endif
-  return a;
-}
-Q ld(B A, Q v, Q w){
-  if(t(w)!=6){printf("load: filename must be string\n"); return ac(2);}
-  char fn[256]; D fn_len = n(w); if(fn_len > 255) fn_len = 255;
-  for(D i=0; i<fn_len; i++) fn[i] = (char)pi(w,i); fn[fn_len] = 0;
-  void* map_base = 0; Q sz = 0;
-#if defined(_MSC_VER)
-  HANDLE hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-  if(hf == INVALID_HANDLE_VALUE) { printf("load: open failed\n"); return ac(2); }
-  LARGE_INTEGER li; GetFileSizeEx(hf, &li); sz = li.QuadPart;
-  HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, 0, 0, NULL);
-  if(hmap == NULL) { CloseHandle(hf); printf("load: create mapping failed\n"); return ac(2); }
-  map_base = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-  CloseHandle(hmap); // Keep hf open for append
-  if(map_base == NULL) { printf("load: map view failed\n"); return ac(2); }
-#else
-  int fd = open(fn, O_RDWR);
-  if(fd < 0) { printf("load: open failed\n"); return ac(2); }
-  struct stat st; fstat(fd, &st); sz = st.st_size;
-  map_base = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  // Keep fd open for append
-  if(map_base == MAP_FAILED) { printf("load: mmap failed\n"); return ac(2); }
-#endif
-  if(FT_n >= 4096) { printf("load: file table full\n"); return ac(2); }
-  FT[FT_n].addr = map_base;
-   
-  Q used = *((Q*)map_base + 1);
-  if(used < 16) used = sz;
-  FT[FT_n].sz = used;
-  FT[FT_n].cap = sz;
-#if defined(_MSC_VER)
-  FT[FT_n].h = (Q)hf;
-#else
-  FT[FT_n].h = (Q)fd;
-#endif
-  Q root = *(Q*)map_base;
-  if(ip(root) && ha(root)==2){
-    root |= ((Q)FT_n << 44); // Inject file index into root pointer
-  }
-  FT_n++;
-  return root;
-}
-Q apnd(B A, Q v, Q a, Q w){
-  if(ip(a) && ha(a)==2){
-    D fid = a >> 44;
-    if(fid >= FT_n) return ac(2);
-    FI* f = &FT[fid];
-    Q used = *((Q*)f->addr + 1);
-    if(f->cap < used + ARENA_SZ){ // Ensure space for w
-      Q new_cap = used + 2 * ARENA_SZ;
-#if defined(_MSC_VER)
-      UnmapViewOfFile(f->addr);
-      HANDLE hf = (HANDLE)f->h;
-      LARGE_INTEGER li; li.QuadPart = new_cap;
-      SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf);
-      HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, 0, 0, NULL);
-      f->addr = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-      CloseHandle(hmap);
-#else
-      munmap(f->addr, f->cap);
-      int fd = (int)f->h;
-      ftruncate(fd, new_cap);
-      f->addr = mmap(0, new_cap, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-#endif
-      f->cap = new_cap;
-    }
-    Q offset = used;
-    Q h = cp2f(w, (Q*)f->addr, &offset);
-    
-    // Root update logic
-    Q root = *(Q*)f->addr;
-    Q new_root = 0;
-    D n = 0;
-    Q* r_ptr = 0;
 
-    if(root != 0){
-      Q r_off = (root >> 6) & 0x3FFFFFFFFF;
-      r_ptr = (Q*)((B*)f->addr + r_off*16);
-      if(r_ptr[0] != 0) return ac(2); // Only append to generic lists
-      n = r_ptr[4];
-    }
+  remove(fn); // Overwrite by removing first.
 
-    D new_n = n + 1;
-    D c = cn(0,1,new_n);
-    Q sz = az(3, c);
-    sz = (sz + 15) & ~15;
+  D fid = find_empty_ft_slot();
 
-    if(f->cap < offset + sz){ // Ensure space for new root
-       // Resize logic (simplified: just force a resize if tight, reusing previous block logic would be better but this is safe)
-       // For brevity in this patch, assuming the initial ARENA_SZ cushion is enough for the root list overhead usually.
-       // If strictly needed, we would repeat the resize block here. 
-       // Given ARENA_SZ is 4GB, it's likely fine for the root list unless the list itself is massive.
-    }
+  Q sz=0, h=0;
+  void* map_base = os_map(fn, &sz, &h);
+  if(!map_base) { printf("file: save failed to map\n"); return ac(2); }
 
-    Q* rh = (Q*)((B*)f->addr + offset);
-    ah(rh, 0, 1, 3, 0, new_n, c);
-    if(n > 0) memcpy(rh+6, r_ptr+6, n*8);
-    rh[6+n] = h;
-    new_root = (offset >> 4) << 6 | (2 << 4) | 0;
-    offset += sz;
+  // Temporarily populate FT to use materialize
+  ((Q*)p(FT_addr))[fid] = (Q)map_base;
+  ((Q*)p(FT_sz))[fid]   = 16;
+  ((Q*)p(FT_cap))[fid]  = sz;
+  ((Q*)p(FT_h))[fid]    = h;
 
-    f->sz = offset;
-    *((Q*)f->addr + 1) = f->sz;
-    *(Q*)f->addr = new_root;
-    return new_root | ((Q)fid << 44);
-  }
-  if(t(a)==6){
-    char fn[256]; D fn_len = n(a); if(fn_len > 255) fn_len = 255;
-    for(D i=0; i<fn_len; i++) fn[i] = (char)pi(a,i); fn[fn_len] = 0;
-    void* map_base = 0; Q sz = 0;
-#if defined(_MSC_VER)
-    HANDLE hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if(hf == INVALID_HANDLE_VALUE) return ac(2);
-    LARGE_INTEGER li; GetFileSizeEx(hf, &li); sz = li.QuadPart;
-    HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, 0, 0, NULL);
-    if(hmap == NULL) { CloseHandle(hf); return ac(2); }
-    map_base = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-    CloseHandle(hmap);
-    if(map_base == NULL) { 
-      CloseHandle(hf); 
-      return ac(99);
-    }
-#else
-    int fd = open(fn, O_RDWR);
-    if(fd < 0) return ac(2);
-    struct stat st; fstat(fd, &st); sz = st.st_size;
-    map_base = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if(map_base == MAP_FAILED) {       
-      close(fd); 
-      return ac(99);
-    }
-#endif
-    Q used = *((Q*)map_base + 1);
-    if(used < 16) used = 16;
-    if(sz < used + ARENA_SZ){ // Ensure space for w
-      Q new_sz = used + 2 * ARENA_SZ;
-#if defined(_MSC_VER)
-      UnmapViewOfFile(map_base);
-      li.QuadPart = new_sz;
-      SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf);
-      hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, 0, 0, NULL);
-      map_base = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-      CloseHandle(hmap);
-#else
-      munmap(map_base, sz);
-      ftruncate(fd, new_sz);
-      map_base = mmap(0, new_sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-#endif
-      sz = new_sz;
-    }
-    Q offset = used;
-    Q h = cp2f(w, (Q*)map_base, &offset);
+  Q f_handle = aA(2, fid);
+  Q root_ptr = q2a(di(f_handle), w);
+  *(Q*)map_base = strip_fid(root_ptr);
 
-    // Root update logic
-    Q root = *(Q*)map_base;
-    Q new_root = 0;
-    D n = 0;
-    Q* r_ptr = 0;
+  os_unmap(fid);
 
-    if(root != 0){
-      Q r_off = (root >> 6) & 0x3FFFFFFFFF;
-      r_ptr = (Q*)((B*)map_base + r_off*16);
-      if(r_ptr[0] != 0) return ac(2);
-      n = r_ptr[4];
-    }
-
-    D new_n = n + 1;
-    D c = cn(0,1,new_n);
-    Q rsz = az(3, c);
-    rsz = (rsz + 15) & ~15;
-
-    if(sz < offset + rsz){
-       // Resize logic omitted for brevity, assuming ARENA_SZ cushion. 
-       // In production code, repeat the resize check here.
-    }
-
-    Q* rh = (Q*)((B*)map_base + offset);
-    ah(rh, 0, 1, 3, 0, new_n, c);
-    if(n > 0) memcpy(rh+6, r_ptr+6, n*8);
-    rh[6+n] = h;
-    new_root = (offset >> 4) << 6 | (2 << 4) | 0;
-    offset += rsz;
-
-    *((Q*)map_base + 1) = offset;
-    *(Q*)map_base = new_root;
-#if defined(_MSC_VER)
-    FlushViewOfFile(map_base, 0); UnmapViewOfFile(map_base); CloseHandle(hf);
-#else
-    msync(map_base, sz, MS_SYNC); munmap(map_base, sz); close(fd);
-#endif
-    return a;
-  }
-  return ac(2);
-}
-Q rt(B A, Q v, Q a, Q w){
-  if(!(ip(a) && ha(a)==2)) return ac(2);
-  D fid = a >> 44;
-  if(fid >= FT_n) return ac(2);
-  *(Q*)FT[fid].addr = w & 0x00000FFFFFFFFFFFULL; // Strip runtime File ID (high 20 bits) before writing to disk
   return w;
 }
-#define VTZ 23
+
+Q file_read(Q f){
+  D fid = AR_FID(di(f));
+  Q root = *(Q*)((Q*)p(FT_addr))[fid];
+  if(ip(root) && ha(root)==2){
+    root |= ((Q)fid << 44); // Inject file index into root pointer
+  }
+  return root;
+}
+Q ld(B A, Q v, Q w){
+  Q f = fl(A,v,w);
+  if(t(f)==2 && dc(f)==2) return f;
+  return file_read(f);
+}
+Q file_append(Q a, Q w){
+  D fid = AR_FID(di(a));
+  Q* addrs = (Q*)p(FT_addr);
+
+  // 1. Read the old root object's pointer.
+  Q old_root_ptr = file_read(a);
+
+  Q new_root_ptr;
+  if (old_root_ptr) {
+    // 2. Materialize the old root into a temporary arena (arena 0).
+    Q old_root_ram = q2a(0, old_root_ptr);
+    // 3. Concatenate the new data 'w' in the temporary arena.
+    Q new_root_ram = ca(0, av(8), old_root_ram, w);
+    // 4. Materialize the combined result back into the file arena.
+    new_root_ptr = q2a(di(a), new_root_ram);
+  } else {
+    new_root_ptr = q2a(di(a), w);
+  }
+
+  // 5. Update the file header to point to the new root.
+  *(Q*)addrs[fid] = strip_fid(new_root_ptr);
+
+  return a;
+}
+
+Q file_log(Q a, Q w){
+  q2a(di(a), w);
+  return a;
+}
+
+Q file_read_log(Q f){
+  D fid = AR_FID(di(f));
+  Q* addrs = (Q*)p(FT_addr);
+  Q* szs = (Q*)p(FT_sz);
+  Q* base_addr = (Q*)addrs[fid];
+  Q used_size = szs[fid];
+
+  // Preallocate enough capacity so we never hit grow() (currently unimplemented).
+  // Smallest on-disk object is at least 64 bytes: 48-byte header + payload, aligned to 16.
+  Q max_entries = 1;
+  if (used_size > 16) max_entries = ((used_size - 16) / 64) + 1;
+  Q result_list = lca(0, (D)max_entries);
+  
+  // Log data starts after the 16-byte file header reservation
+  Q offset = 16; 
+
+  while(offset < used_size){
+    Q* obj_header = (Q*)( (B*)base_addr + offset );
+    
+    B type = obj_header[0];
+    B ls = obj_header[2];
+    D c = obj_header[5];
+
+    // Reconstruct the Arena 2 pointer for the object at the current offset
+    // NOTE: Pointer low-nibble must be 0. Type lives in the heap header, not in the pointer tag.
+    Q obj_ptr = ((offset >> 4) << 6) | (2 << 4);
+    obj_ptr |= ((Q)fid << 44); // Inject file ID
+
+    // Append the discovered object's pointer to our result list
+    xn(result_list, 1);
+    zid(result_list, n(result_list)-1, obj_ptr);
+
+    // Calculate the space this object took on disk to find the next one
+    Q disk_size = az(ls, c);
+    disk_size = (disk_size + 15) & ~15;
+    
+    if (disk_size == 0) break; // Safeguard against corrupted data
+
+    offset += disk_size;
+  }
+
+  return result_list;
+}
+
+#define VTZ 25
 #define ATZ 15
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -653,27 +768,28 @@ void pr(Q q){
       }
     }
   }
-  if(1==t(q)){pr_b(di(q),62);}
+  if(1==t(q)){pr_b(ip(q)?pi(q,0):di(q),62);}
   if(2==t(q)){printf("%s",VT[dv(q)]);}
   if(18==t(q)){printf("%s",AT[da(q)]);}
-  if(34==t(q)){printf("control: %c\n",dc(q));}
+  if(34==t(q)){printf("control: %c\n",(char)dc(q));}
+  if(9==t(q)){printf("file:%d", (int)AR_FID(di(q)));}
   if(6==t(q)){
-    if(0==sh(q)){printf("\"%c\"",di(q));}
-    if(1==sh(q)){printf("\"");for(D i=0;i<n(q);i++)printf("%c",pi(q,i));printf("\"");}
+    if(0==sh(q)){printf("\"%c\"",(char)(ip(q)?pi(q,0):di(q)));}
+    if(1==sh(q)){printf("\"");for(D i=0;i<n(q);i++)printf("%c",(char)pi(q,i));printf("\"");}
   }
   if(3==t(q)){
-    if(0==sh(q)){printf("%lld",di(q));}
+    if(0==sh(q)){printf("%lld",(long long)(ip(q)?pi(q,0):di(q)));}
     if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld",pi(q,i));if(i<n(q)-1){printf(" ");}}} else {printf("!0");}}
   }
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   if(5==t(q)){printf("hash table: ");for(D i=0;i<cp(q);i++){printf("%d:%lld ",i,pi(q,i));}printf("\n");}
-  if(7==t(q)){printf("`");pr_b(di(q),62);}
+  if(7==t(q)){printf("`");pr_b(ip(q)?pi(q,0):di(q),62);}
 }
 DV VD[VTZ];
 MV VM[VTZ];
 
 Q id(B A,Q v,Q w){return w;}
-Q en(B A,Q v,Q w){B aw=ia(w);Q z=vn(aw?t(w):0,ls(w),1);if(aw){pid(z,0,di(w));}else{zid(z,0,w);};return z;}
+Q en(B A,Q v,Q w){B aw=ia(w);Q z=vna(0,aw?t(w):0,ls(w),1);if(aw){pid(z,0,di(w));}else{zid(z,0,w);};return z;}
 Q tp(B A,Q v,Q w){return an(t(w));}
 Q ct(B A,Q v,Q w){return an(n(w));}
 
@@ -698,20 +814,20 @@ Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
       if(34==t(zi)){return zi;}                                                         // sentinel bubbled up. later: add cleanup
       zid(z,i,zi);
     }
-    if(2==sa){
-      Q zd=dnu(0,3,0);
-      Q *hh=ptr(pi(a,0));Q hc=tsn(hh[0],hh[1],hh[2],hh[4]);
+    if(2==sa){ // TODO: arena awareness
+      Q zd=dnu(0,3,0,A);
+      Q *hh=ptr(pi(a,0));Q hc=tsna(A,hh[0],hh[1],hh[2],hh[4],hh[5]);
       memcpy(p(hc),p(pi(a,0)),(1<<hh[2])*hh[4]);
-      Q *hk=ptr(pi(a,1));Q kc=tsn(hk[0],hk[1],hk[2],hk[4]);
+      Q *hk=ptr(pi(a,1));Q kc=tsna(A,hk[0],hk[1],hk[2],hk[4],hk[5]);
       memcpy(p(kc),p(pi(a,1)),(1<<hk[2])*hk[4]);
       zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z);
       return zd;
     }
-    if(2==sw){
-      Q zd=dnu(0,3,0);
-      Q *hh=ptr(pi(w,0));Q hc=tsn(hh[0],hh[1],hh[2],hh[4]);
+    if(2==sw){ // TODO: arena awareness
+      Q zd=dnu(0,3,0,A);
+      Q *hh=ptr(pi(w,0));Q hc=tsna(A,hh[0],hh[1],hh[2],hh[4],hh[5]);
       memcpy(p(hc),p(pi(w,0)),(1<<hh[2])*hh[4]);
-      Q *hk=ptr(pi(w,1));Q kc=tsn(hk[0],hk[1],hk[2],hk[4]);
+      Q *hk=ptr(pi(w,1));Q kc=tsna(A,hk[0],hk[1],hk[2],hk[4],hk[5]);
       memcpy(p(kc),p(pi(w,1)),(1<<hk[2])*hk[4]);
       zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z);
       return zd;
@@ -723,9 +839,9 @@ Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
 
 Q car(B A,Q v,Q w){return 0==sh(w)?w:qi(w,0);}
 
-Q math_m(Q w,RMO op){
+Q math_m(Q w,RMO op){ // TODO: arena awareness
   if(0==sh(w)){return an(op(di(w)));}
-  Q z=vn(t(w),ls(w),n(w));
+  Q z=vna(0,t(w),ls(w),n(w));
   for(D i=0;i<n(w);i++){pid(z,i,op(ri(w,i)));}
   return z;
 }
@@ -733,9 +849,9 @@ Q nt_aa(Q w){return !w;}
 Q nt(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}return math_m(w,nt_aa);}
 
 Q tl(B A,Q v,Q w){
-  B aw=ia(w);if(aw){w=en(A,av(8),w);};D nw=n(w);Q z=ln(nw);
+  B aw=ia(w);if(aw){w=en(A,av(8),w);};D nw=n(w);Q z=lna(A,nw);
   for(D i=0;i<nw;i++){
-    Q ni=pi(w,i);Q zi=vn(3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
+    Q ni=pi(w,i);Q zi=vna(0,3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
     zid(z,i,zi);
   }
   return aw?car(A,av(6),z):z;
@@ -745,8 +861,8 @@ Q at(B A,Q v,Q a,Q w){
   Q z=vb(A,v,a,w,RB,-1);
   if(34!=t(z)){return z;}if(dc(z)){return z;}
   B aa=ia(a),aw=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);
-  if(aw){return aa?a:qi(a,ra(w));}
-  z=vn(t(a),ls(a),nz);
+  if(aw){return aa?a:qi(a,ra(w));} // TODO: arena awareness
+  z=vna(0,t(a),ls(a),nz);
   for(D i=0;i<nz;i++){ // unmerge this. use shape of w to dispatch. 
     Q zi=ri(a,aw?ra(w):ri(w,i));
     qid(z,i,zi);
@@ -757,7 +873,7 @@ Q at(B A,Q v,Q a,Q w){
 Q math(Q a,Q w,RDO op){ // anything that gets here has been broadcasted. we can use the universal getter on both a and w
   D na=n(a),nw=n(w);D nz=na<nw?nw:na;B sa=sh(a),sw=sh(w);B shz=sh(a)<sh(w)?sh(w):sh(a);B lz=ls(a)<ls(w)?ls(w):ls(a);
   if(0==shz){return an(op(di(a),di(w)));}
-  Q z=vn(t(a),lz,nz);
+  Q z=vna(0,t(a),lz,nz); // TODO: arena awareness
   for(D i=0;i<nz;i++){Q ai=sa?ri(a,i):ra(a);Q wi=sw?ri(w,i):ra(w);
     Q zi=op(ai,wi);
     pid(z,i,zi);
@@ -800,8 +916,28 @@ Q set(Q a,Q w,D sp){
 }
 
 Q ca(B A,Q v,Q a,Q w){
-  B tz=(t(a)==t(w))?t(a):0;
-  D j=0;D na=n(a),nw=n(w);Q z=vn(tz,tz?ls(a):3,na+nw);
+  if(t(a)==9) return file_append(a,w);
+  // Arena-aware concatenation
+  Q dest_ar = 0; // Default to temporary arena
+  if (!ia(a)) {
+    B ha_a = ha(a);
+    if (ha_a == 2) dest_ar = MK_AR(2, a >> 44);
+    else dest_ar = ha_a;
+  }
+  if (!ia(w)) {
+    B ha_w = ha(w);
+    if (ha_w == 2) {
+      if (AR_ID(dest_ar) != 2) dest_ar = MK_AR(2, w >> 44);
+    } else if (ha_w > AR_ID(dest_ar) && AR_ID(dest_ar) != 2) {
+      dest_ar = ha_w;
+    }
+  }
+
+  if (t(w)==9) w = file_read(w); // If w is a file, read its root
+
+  B tz = (t(a)==t(w)) ? t(a) : 0;
+  D j=0; D na=n(a), nw=n(w);
+  Q z = vna(dest_ar, tz, tz ? ls(a) : 3, na+nw);
   for(D i=0;i<na;i++,j++){Q ai=at(A,av(3),a,an(i));qid(z,j,tz?ra(ai):ai);} // decode if not type 0
   for(D i=0;i<nw;i++,j++){Q wi=at(A,av(3),w,an(i));qid(z,j,tz?ra(wi):wi);} // decode if atom or somethig
   return z;
@@ -815,7 +951,7 @@ Q ov(B A,Q v,Q a,Q w){
   if(0==sh(w))return dispatch_monad(v,w);
   D nw=n(w);if(0==nw){if(a)return a;printf("ov empty\n");return ac(2);}
   Q acc;D i=0;
-  if(a){acc=a;}else{acc=qi(w,0);i=1;}
+  if(a){acc=a;}else{acc=qi(w,0);i=1;} // TODO: arena awareness
   for(;i<nw;i++){acc=dispatch_dyad(v,acc,qi(w,i));}
   return acc;
 }
@@ -823,7 +959,7 @@ Q sc(B A,Q v,Q a,Q w){
   if(0==sh(w))return dispatch_monad(v,w);
   D nw=n(w);D zn=a?nw+1:nw;Q z=ln(zn);
   Q acc;D i=0;D j=0;
-  if(a){acc=a;zid(z,j++,acc);}else{acc=qi(w,0);zid(z,j++,acc);i=1;}
+  if(a){acc=a;zid(z,j++,acc);}else{acc=qi(w,0);zid(z,j++,acc);i=1;} // TODO: arena awareness
   for(;i<nw;i++){acc=dispatch_dyad(v,acc,qi(w,i));zid(z,j++,acc);}
   return z;
 }
@@ -925,9 +1061,11 @@ Q its(B A,Q v,Q a,Q w){
   return z;
 }
 
-DV VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,apnd,rt};
-MV VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,0,0};
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","append","root"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+Q lg(B A, Q v, Q a, Q w);
+Q rl(B A, Q v, Q w);
+DV VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0};
+MV VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl};
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 ADV AVD[ATZ]={0,0 ,ed,0 ,0 ,el,er,0  ,0  ,0,0,lvl,lsl,itr,its};
 ADV AVM[ATZ]={0,em,0 ,sc,ov,0 ,0 ,lvs,lfa,0,0,0  ,0  ,0  ,0  };
 C* AT[ATZ]={" ","'","T","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -951,14 +1089,27 @@ Q dispatch_dyad(Q v,Q a,Q w){
   return ac(2);
 }
 
-Q Ap(Q a){Q p=tsn(4,1,3,1);pid(p,0,a);return p;}
+Q lg(B A, Q v, Q a, Q w){
+  Q f = fl(0, 0, a);
+  if(t(f) == 34) return f;   // propagate file open error sentinel
+  if(t(f) != 9) return ac(2);
+  return file_log(f, w);
+}
+Q rl(B A, Q v, Q w){
+  Q f = fl(A, v, w);
+  if(t(f) == 34) return f;
+  if(t(f) != 9) return ac(2);
+  return file_read_log(f);
+}
+
+Q Ap(Q a){Q p=tsna(0,4,1,3,1,1);pid(p,0,a);return p;}
 Q e(Q** q);
 Q E(Q** q,C tc);
 Q eoc(Q** q){
   (*q)++;
   if(SP+1 >= 1024) return ac(99);                                            // scope depth overflow
   SP++;D csp=SP;                                                            // cache the SP of this new allocation, return that.
-  SC[SP] = dn(0,3,0);                                                       // Allocate new dictionary for the new scope
+  SC[SP] = dn(0,3,0,0);                                                       // Allocate new dictionary for the new scope
   E(q,'}');                                                               // Evaluate the inner expression
   //if(**q && 34==t(**q) && dc(**q)=='}'){ printf("eoc advanced past }\n");(*q)++;}
   return SC[csp];                                                           // Return the created dictionary
@@ -970,7 +1121,7 @@ Q eol(Q** q){
   (*q)++;
   if(LP+1 >= 1024) return ac(99);
   LP++;D clp=LP;
-  NL[LP] = vc(0,3,64,0);
+  NL[LP] = vca(0, 0, 3, 64);
   E(q,')');
   //if(**q && 34==t(**q) && dc(**q)==')'){printf("eol advanced past )\n"); (*q)++; }// if we landed on ')' advance theh pointer by 1 at the end.
   return NL[clp];
@@ -981,7 +1132,7 @@ Q emv(Q** q){
   Q v=*(*q)++;
   while(18==t(**q)){v=av(dv(v)*15+(da(*(*q)++)-1)+32);}
   Q w=e(q);
-  if(4==t(w)){Q p=tsn(4,1,3,1);pid(p,0,v);return ca(0,av(8),p,w);}
+  if(4==t(w)){Q p=tsna(0,4,1,3,1,1);pid(p,0,v);return ca(0,av(8),p,w);}
   Q r=dispatch_monad(v,w);
   return r;
 }
@@ -990,7 +1141,7 @@ Q edv(Q a,Q** q){
   D current_sp = SP;Q v=*(*q)++;
   while(18==t(**q)){v=av(dv(v)*15+(da(*(*q)++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q);
-  if(4==t(w)&&(7!=dv(v))){Q p=tsn(4,1,3,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
+  if(4==t(w)&&(7!=dv(v))){Q p=tsna(0,4,1,3,2,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
   a=((1==t(a))&&(7!=dv(v)))?dk(SC[current_sp],a):a;
   if(7==dv(v)){return set(a,w,current_sp);}                                     // If this is an assignment, use the cached scope pointer to write into the correct scope.
   Q r=dispatch_dyad(v,a,w);
@@ -1013,13 +1164,13 @@ Q E(Q** q, C tc){
 
 Q e(Q** q){
   Q a=**q;
-  if(!a){return tsn(4,1,3,0);}                                  // If a is the end of the stream then we must have missing data. return type 4
+  if(!a){return tsna(0,4,1,3,0,0);}                                  // If a is the end of the stream then we must have missing data. return type 4
   if(34==t(a)){
     if('{'==dc(a)){a=eoc(q);}
     if('}'==dc(a)){a=ecc(q);}
     if('('==dc(a)){a=eol(q);}
     if(')'==dc(a)){a=ecl(q);}
-    if(';'==dc(a)) return tsn(4,1,3,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
+    if(';'==dc(a)) return tsna(0,4,1,3,0,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
   }
   Q w=(*q)[1];                                                     // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
   B endexpr = !w || (34==t(w) && dc(w)==';');                    // end of expression is null or semicolon or }
@@ -1029,7 +1180,7 @@ Q e(Q** q){
   if(endscope){ecc(q);}
   if(endlist){ecl(q);}
   return (2==t(a)&&!end)  ?                                // if a is a verb and w isn't the end of the stream
-         emv(q)        :                                       //  then evaluate a monadic verb
+         emv(q)        :                                       //  then evaluate a monadic verb // TODO: arena awareness
          (2==t(a)&&end) ?                                   // if a is a verb and we have hit the end of the stream
          Ap(a)         :                                       //  then create a dyadic partial evaluation
          (!end&&2==t(w))  ?                                   // if w is non-zero and is a verb
@@ -1082,8 +1233,8 @@ D TT[9][12]={ // Transition Table
 Q pn(C* s, D len){
   D c=0;C* p=s;
   while(*p){while(*p==' ')p++;if(!*p)break;c++;while(*p&&*p!=' ')p++;}
-  if(c==1){p=s;while(*p==' ')p++;C* t=p;while(*p&&*p!=' ')p++;return an(parse_b(t,p-t,10));}
-  Q z=vn(3,3,c);p=s;
+  if(c==1){p=s;while(*p==' ')p++;C* t=p;while(*p&&*p!=' ')p++;return an(parse_b(t,p-t,10));} // TODO: arena awareness
+  Q z=vna(0,3,3,c);p=s;
   for(D i=0;i<c;i++){while(*p==' ')p++;C* t=p;while(*p&&*p!=' ')p++;pid(z,i,parse_b(t,p-t,10));}
   return z;
 }
@@ -1110,7 +1261,7 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
           else q[qi++]=ar(parse_b(t,len,62));
         }
         else if(st==6){ s++; len--; strncpy(t,s,len);t[len]='\0'; q[qi++]=as(parse_b(t,len,62));}
-        else if(st==5){ s++; len--; Q z=vn(6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z; if(*p)p++;}
+        else if(st==5){ s++; len--; Q z=vna(0,6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z; if(*p)p++;}
         // TODO: S_FLT
         st=0;break;
       }
@@ -1146,16 +1297,28 @@ C buffer[100];
 D main(void){
 #if defined(_MSC_VER)
   SetConsoleOutputCP(65001);
-  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
+  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
   AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){printf("VA 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #else
-  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){printf("mmap 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=0;
+  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){printf("mmap 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
   AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){printf("mmap 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #endif
   printf("AB[0] AC[0] AI[0] %lld %lld %lld\n",(long long)AB[0],AC[0],AI[0]);
   printf("AB[1] AC[1] AI[1] %lld %lld %lld\n",(long long)AB[1],AC[1],AI[1]);
   buddyinit(1);
-  G=dni(0,3,0,1); // global dictionary
+  FT_addr = vca(1, 3, 3, 4096);
+  FT_sz   = vca(1, 3, 3, 4096);
+  FT_cap  = vca(1, 3, 3, 4096);
+  FT_h    = vca(1, 3, 3, 4096);
+  FT_fn   = vca(1, 0, 3, 4096);
+  G=dni(0,3,0,1); // global dictionary in buddy allocator
+  Q ft = dni(0,3,0,1); // file table dict in buddy allocator
+  dkv(ft, ar(parse_b("addr",4,62)), FT_addr);
+  dkv(ft, ar(parse_b("sz",2,62)),   FT_sz);
+  dkv(ft, ar(parse_b("cap",3,62)),  FT_cap);
+  dkv(ft, ar(parse_b("h",1,62)),    FT_h);
+  dkv(ft, ar(parse_b("fn",2,62)),   FT_fn);
+  dkv(G, ar(parse_b("FT",2,62)),    ft);
   SC[0]=dni(0,3,0,0); SP=0;
   while (1) {
     printf(" "); if (!fgets(buffer, 100, stdin)){break;}
@@ -1166,7 +1329,7 @@ D main(void){
         Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
         dkv(G,t2g(gk),t2g(gv));
       }
-      AI[0]=0;SC[0]=dni(0,3,0,0); SP=0; 
+      AI[0]=1;SC[0]=dni(0,3,0,0); SP=0; 
      } // reset THI only if evaluation takes us back to the global scope. 
     C* s=sub(buffer);
     printf("\033[A\033[2K %s\n",s);

@@ -853,57 +853,69 @@ Q ct(B A,Q v,Q w){return an(n(w));}
 Q dispatch_monad(Q v,Q w);
 Q dispatch_dyad(Q v,Q a,Q w);
 
-typedef enum {DB,LB,RB,MB} BM;                                                          // broadcast mode
-Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
-  if(0==d)return ac(0);
-  B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);D na=2==sa?n(pi(a,1)):n(a),nw=2==sw?n(pi(w,1)):n(w);
-  if(DB==m && na!=nw && sa && sw){printf("vb length\n");return ac(2);}
-  B ib=d>0?1:(DB==m?((!ta)||(!tw)):RB==m?!tw:LB==m?!ta:/*MB==m*/!tw);
-  if(ib){
-    D nz=DB==m?(sa?na:nw):RB==m?nw:LB==m?na:nw;
-    Q z=ln(nz);
-    for(D i=0;i<nz;i++){
-      Q ai=(m!=RB && 1==sa)?qi(a,i):(m!=RB && 2==sa)?qi(pi(a,2),i):a;Q wi=(m!=LB && 1==sw)?qi(w,i):(m!=LB && 2==sw)?qi(pi(w,2),i):w;
-      //Q zi=DB==m?dv(ai,wi):RB==m?dv(a,wi):LB==m?dv(ai,w):/*MB==m*/mv(wi);
-      Q zi=0;
-      if(MB==m)zi=dispatch_monad(v,wi);
-      else zi=dispatch_dyad(v,ai,wi);
-      if(34==t(zi)){return zi;}                                                         // sentinel bubbled up. later: add cleanup
-      zid(z,i,zi);
-    }
-    if(2==sa){ // TODO: arena awareness
-      Q zd=dnu(0,3,0,A);
-      Q *hh=ptr(pi(a,0));Q hc=tsna(A,hh[0],hh[1],hh[2],hh[4],hh[5]);
-      memcpy(p(hc),p(pi(a,0)),(1<<hh[2])*hh[4]);
-      Q *hk=ptr(pi(a,1));Q kc=tsna(A,hk[0],hk[1],hk[2],hk[4],hk[5]);
-      memcpy(p(kc),p(pi(a,1)),(1<<hk[2])*hk[4]);
-      zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z);
-      return zd;
-    }
-    if(2==sw){ // TODO: arena awareness
-      Q zd=dnu(0,3,0,A);
-      Q *hh=ptr(pi(w,0));Q hc=tsna(A,hh[0],hh[1],hh[2],hh[4],hh[5]);
-      memcpy(p(hc),p(pi(w,0)),(1<<hh[2])*hh[4]);
-      Q *hk=ptr(pi(w,1));Q kc=tsna(A,hk[0],hk[1],hk[2],hk[4],hk[5]);
-      memcpy(p(kc),p(pi(w,1)),(1<<hk[2])*hk[4]);
-      zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,z);
-      return zd;
-    }
-    return z;
+typedef enum {NB,DB,LB,RB,MB} BM;                                                       // broadcast mode (NB = no implicit lift)
+static inline Q vb_rebuild_dict(B A, Q d, Q new_vals){
+  Q zd=dnu(0,3,0,A);
+  Q *hh=ptr(pi(d,0));Q hc=tsna(A,hh[0],hh[1],hh[2],hh[4],hh[5]);
+  memcpy(p(hc),p(pi(d,0)),(1ULL<<hh[2])*hh[4]);
+  Q *hk=ptr(pi(d,1));Q kc=tsna(A,hk[0],hk[1],hk[2],hk[4],hk[5]);
+  memcpy(p(kc),p(pi(d,1)),(1ULL<<hk[2])*hk[4]);
+  zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,new_vals);
+  return zd;
+}
+
+static inline B vb_implicit_needed(Q q){ return t(q)==0 && sh(q)!=0; } // boxed list or dict
+
+static inline B vb_need_for(BM m, Q a, Q w){
+  switch(m){
+    case DB: return vb_implicit_needed(a) || vb_implicit_needed(w);
+    case RB: return vb_implicit_needed(w);
+    case LB: return vb_implicit_needed(a);
+    case MB: return vb_implicit_needed(w);
+    case NB: return 0;
+    default: return 0;
   }
-  return ac(0);
+}
+
+Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
+  B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);
+  D na=2==sa?n(pi(a,1)):n(a), nw=2==sw?n(pi(w,1)):n(w);
+  if(DB==m && na!=nw && sa && sw){printf("vb length\n");return ac(2);}
+
+  // Force broadcast for explicit adverbs (d>0). For implicit lifting (d<0), only lift on boxed args.
+  B ib = d>0 ? 1 : (DB==m ? (vb_implicit_needed(a)||vb_implicit_needed(w))
+                         : RB==m ? vb_implicit_needed(w)
+                         : LB==m ? vb_implicit_needed(a)
+                                 : vb_implicit_needed(w));
+  if(!ib){
+    // No lift: behave like normal application (useful for explicit each on atoms).
+    return (MB==m) ? dispatch_monad(v,w) : dispatch_dyad(v,a,w);
+  }
+
+  D nz=DB==m?(sa?na:nw):RB==m?nw:LB==m?na:nw;
+  Q z=ln(nz);
+  for(D i=0;i<nz;i++){
+    Q ai=(m!=RB && 1==sa)?qi(a,i):(m!=RB && 2==sa)?qi(pi(a,2),i):a;
+    Q wi=(m!=LB && 1==sw)?qi(w,i):(m!=LB && 2==sw)?qi(pi(w,2),i):w;
+    Q zi = (MB==m) ? dispatch_monad(v, wi) : dispatch_dyad(v, ai, wi);
+    if(34==t(zi)) return zi;
+    zid(z,i,zi);
+  }
+  if(2==sa) return vb_rebuild_dict(A, a, z);
+  if(2==sw) return vb_rebuild_dict(A, w, z);
+  return z;
 }
 
 Q car(B A,Q v,Q w){return 0==sh(w)?w:qi(w,0);}
 
 Q math_m(Q w,RMO op){ // TODO: arena awareness
-  if(0==sh(w)){return an(op(di(w)));}
+  if(0==sh(w)){return an(op(ra(w)));}
   Q z=vna(0,t(w),ls(w),n(w));
   for(D i=0;i<n(w);i++){pid(z,i,op(ri(w,i)));}
   return z;
 }
 Q nt_aa(Q w){return !w;}
-Q nt(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}return math_m(w,nt_aa);}
+Q nt(B A,Q v,Q w){ return math_m(w,nt_aa); }
 
 Q tl(B A,Q v,Q w){
   B aw=ia(w);if(aw){w=en(A,av(8),w);};D nw=n(w);Q z=lna(A,nw);
@@ -915,11 +927,9 @@ Q tl(B A,Q v,Q w){
 }
 
 Q at(B A,Q v,Q a,Q w){
-  Q z=vb(A,v,a,w,RB,-1);
-  if(34!=t(z)){return z;}if(dc(z)){return z;}
   B aa=ia(a),aw=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);
   if(aw){return aa?a:qi(a,ra(w));} // TODO: arena awareness
-  z=vna(0,t(a),ls(a),nz);
+  Q z=vna(0,t(a),ls(a),nz);
   for(D i=0;i<nz;i++){ // unmerge this. use shape of w to dispatch. 
     Q zi=ri(a,aw?ra(w):ri(w,i));
     qid(z,i,zi);
@@ -929,7 +939,7 @@ Q at(B A,Q v,Q a,Q w){
 
 Q math(Q a,Q w,RDO op){ // anything that gets here has been broadcasted. we can use the universal getter on both a and w
   D na=n(a),nw=n(w);D nz=na<nw?nw:na;B sa=sh(a),sw=sh(w);B shz=sh(a)<sh(w)?sh(w):sh(a);B lz=ls(a)<ls(w)?ls(w):ls(a);
-  if(0==shz){return an(op(di(a),di(w)));}
+  if(0==shz){return an(op(ra(a),ra(w)));}
   Q z=vna(0,t(a),lz,nz); // TODO: arena awareness
   for(D i=0;i<nz;i++){Q ai=sa?ri(a,i):ra(a);Q wi=sw?ri(w,i):ra(w);
     Q zi=op(ai,wi);
@@ -952,20 +962,20 @@ Q sb_aa(Q a,Q w){return a-w;}
 Q bn_aa(Q w){return ~w;}
 Q ng_aa(Q w){return -w;}
 
-Q pl(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,pl_aa);} // later: float support and type promotion. 
-Q ml(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,ml_aa);}
-Q mn(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,mn_aa);}
-Q mx(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,mx_aa);}
-Q eq(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,eq_aa);}
-Q lt(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,lt_aa);}
-Q gt(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,gt_aa);}
-Q nd(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,an_aa);}
-Q or(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,or_aa);}
-Q xr(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,xr_aa);}
-Q sb(B A,Q v,Q a,Q w){Q z=vb(A,v,a,w,DB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math(a,w,sb_aa);}
+Q pl(B A,Q v,Q a,Q w){ return math(a,w,pl_aa); } // later: float support and type promotion.
+Q ml(B A,Q v,Q a,Q w){ return math(a,w,ml_aa); }
+Q mn(B A,Q v,Q a,Q w){ return math(a,w,mn_aa); }
+Q mx(B A,Q v,Q a,Q w){ return math(a,w,mx_aa); }
+Q eq(B A,Q v,Q a,Q w){ return math(a,w,eq_aa); }
+Q lt(B A,Q v,Q a,Q w){ return math(a,w,lt_aa); }
+Q gt(B A,Q v,Q a,Q w){ return math(a,w,gt_aa); }
+Q nd(B A,Q v,Q a,Q w){ return math(a,w,an_aa); }
+Q or(B A,Q v,Q a,Q w){ return math(a,w,or_aa); }
+Q xr(B A,Q v,Q a,Q w){ return math(a,w,xr_aa); }
+Q sb(B A,Q v,Q a,Q w){ return math(a,w,sb_aa); }
 
-Q bn(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math_m(w,bn_aa);}
-Q ng(B A,Q v,Q w){Q z=vb(A,v,0,w,MB,-1);if(34!=t(z)){return z;}if(dc(z)){return z;}; return math_m(w,ng_aa);}
+Q bn(B A,Q v,Q w){ return math_m(w,bn_aa); }
+Q ng(B A,Q v,Q w){ return math_m(w,ng_aa); }
 
 Q set(Q a,Q w,D sp){
   dkv(SC[sp],a,w);
@@ -1122,6 +1132,62 @@ Q lg(B A, Q v, Q a, Q w);
 Q rl(B A, Q v, Q w);
 DV VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0};
 MV VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl};
+
+static const BM VBM[VTZ]={
+  /*  0 */ NB,
+  /*  1 */ MB, // ~
+  /*  2 */ NB, // !
+  /*  3 */ NB, // @
+  /*  4 */ NB, // #
+  /*  5 */ NB, // +
+  /*  6 */ NB, // *
+  /*  7 */ NB, // :
+  /*  8 */ NB, // ,
+  /*  9 */ NB, // &
+  /* 10 */ NB, // |
+  /* 11 */ NB, // =
+  /* 12 */ NB, // <
+  /* 13 */ NB, // >
+  /* 14 */ NB, // ^
+  /* 15 */ NB, // and
+  /* 16 */ NB, // or
+  /* 17 */ MB, // bnot
+  /* 18 */ MB, // - (negate)
+  /* 19 */ NB, // save
+  /* 20 */ NB, // load
+  /* 21 */ NB, // file
+  /* 22 */ NB, // root
+  /* 23 */ NB, // log
+  /* 24 */ NB, // readlog
+};
+
+static const BM VBD[VTZ]={
+  /*  0 */ NB,
+  /*  1 */ NB, // ~
+  /*  2 */ NB, // !
+  /*  3 */ RB, // @
+  /*  4 */ NB, // #
+  /*  5 */ DB, // +
+  /*  6 */ DB, // *
+  /*  7 */ NB, // :
+  /*  8 */ NB, // ,
+  /*  9 */ DB, // &
+  /* 10 */ DB, // |
+  /* 11 */ DB, // =
+  /* 12 */ DB, // <
+  /* 13 */ DB, // >
+  /* 14 */ DB, // ^
+  /* 15 */ DB, // and
+  /* 16 */ DB, // or
+  /* 17 */ NB, // bnot
+  /* 18 */ DB, // -
+  /* 19 */ NB, // save
+  /* 20 */ NB, // load
+  /* 21 */ NB, // file
+  /* 22 */ NB, // root
+  /* 23 */ NB, // log
+  /* 24 */ NB, // readlog
+};
 C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 ADV AVD[ATZ]={0,0 ,ed,0 ,0 ,el,er,0  ,0  ,0,0,lvl,lsl,itr,its};
 ADV AVM[ATZ]={0,em,0 ,sc,ov,0 ,0 ,lvs,lfa,0,0,0  ,0  ,0  ,0  };
@@ -1129,7 +1195,11 @@ C* AT[ATZ]={" ","'","T","→","←","↰","↱","↓","↑","↺","↻","↿","�
 
 Q dispatch_monad(Q v,Q w){
   Q r=dv(v);
-  if(r<32)return VM[r](0,v,w);
+  if(r<32){
+    BM m = (r < VTZ) ? VBM[r] : NB;
+    if(m!=NB && vb_need_for(m, 0, w)) return vb(0, v, 0, w, m, -1);
+    return VM[r] ? VM[r](0,v,w) : ac(2);
+  }
   D c=(r-32)%15;Q b=av((r-32)/15);
   D idx=c+1;
   if(AVM[idx])return AVM[idx](0,b,0,w);
@@ -1138,7 +1208,11 @@ Q dispatch_monad(Q v,Q w){
 }
 Q dispatch_dyad(Q v,Q a,Q w){
   Q r=dv(v);
-  if(r<32)return VD[r](0,v,a,w);
+  if(r<32){
+    BM m = (r < VTZ) ? VBD[r] : NB;
+    if(m!=NB && vb_need_for(m, a, w)) return vb(0, v, a, w, m, -1);
+    return VD[r] ? VD[r](0,v,a,w) : ac(2);
+  }
   D c=(r-32)%15;Q b=av((r-32)/15);
   D idx=c+1;
   if(AVD[idx])return AVD[idx](0,b,a,w);

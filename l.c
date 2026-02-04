@@ -323,12 +323,51 @@ Q ra(Q q){                                                                      
     default: return ac(5);                                                      // not yet implemented
   }
 }
-Q grow(Q q,D n,D c,D m){printf("growing\n");exit(1);return ac(5);}                      // not yet implemented but, given a q, old length n, old capacity c, and amount of new items to add, extend the allocation to a new c, set the proper n.
-D xn(Q q,D m){                                                                  // if n(q)+m<c then set n to n+m otherwise grow
-  D nq=n(q);D c=cp(q);
-  printf("q t(q) nq m c %lld %d %d %d %d\n",q,t(q),nq,m,c);
-  if(nq+m<=c){ptr(q)[4]=nq+m;}else{grow(q,nq,c,m);}
-  return nq+m;
+static inline D grow_cap_default(D old_cap, D need){
+  D cap = old_cap ? old_cap : 1;
+  while(cap < need){
+    D next = cap + (cap>>1) + (cap>>3);
+    if(next <= cap){ cap = need; break; }
+    cap = next;
+  }
+  return cap;
+}
+
+Q grow(Q q, D need_n){
+  if(!ip(q) || sh(q)!=1) return ac(1);
+
+  Q* h = ptr(q);
+  B tq = (B)h[0], sq = (B)h[1], zq = (B)h[2];
+  D old_n = (D)h[4], old_c = (D)h[5];
+
+  if(tq==5){
+    // Hash tables depend on the probe mask (capacity). Growing requires rehashing with the keys.
+    // Do not attempt to resize here; dict-level code should rebuild ht+rehash.
+    return ac(6);
+  }
+
+  D new_c = grow_cap_default(old_c, need_n);
+  Q ar = (ha(q)==2) ? MK_AR(2, (D)(q>>44)) : (Q)ha(q);
+  Q nq = tsna(ar, tq, sq, zq, need_n, new_c);
+
+  // Copy old payload; new region is already zeroed by allocators.
+  memcpy(p(nq), p(q), (1ULL<<zq) * (Q)old_n);
+
+  // Classic COW: if this is a pointer list, bump child refcounts so old and new can be independently freed.
+  if(tq==0){
+    for(D i=0;i<old_n;i++) ir(pi(nq, i));
+  }
+
+  return nq;
+}
+
+Q xn(Q q, D add){
+  if(!ip(q) || sh(q)!=1) return ac(1);
+  D old_n = n(q);
+  D need_n = old_n + add;
+  D c = cp(q);
+  if(need_n <= c){ ptr(q)[4] = need_n; return q; }
+  return grow(q, need_n);
 }
 // varwidth setters
 void Bid(B* b,B z,D i,Q d){memcpy(b+z*i,&d,z);}
@@ -397,11 +436,25 @@ Q dkv(Q d,Q k,Q v){
     return v;
   }
   D idx = n(kq);                                                              // insert new key/value
-  xn(kq,1);zid(kq, idx, k);                                                   // append key
-  xn(vq,1);qid(vq, idx, v);                                                   // append value
+  Q kq2 = xn(kq,1); if(34==t(kq2)) return kq2; if(kq2!=kq){ zid(d,1,kq2); kq=kq2; }
+  zid(kq, idx, k);                                                            // append key
+  Q vq2 = xn(vq,1); if(34==t(vq2)) return vq2; if(vq2!=vq){ zid(d,2,vq2); vq=vq2; }
+  qid(vq, idx, v);                                                            // append value
   ht[i] = idx + 1;                                                            // write hash entry
-  xn(htq,1);                                                                  // n means element count for hash                          
+  // Track number of active hash entries in the ht header (capacity remains fixed).
+  ptr(htq)[4] = (Q)(n(htq) + 1);
   return v;
+}
+Q parse_b(C* s, D len, D base);
+static void ft_refresh_dict(){
+  if(!G) return;
+  Q ft = dk(G, ar(parse_b("FT",2,62)));
+  if(34==t(ft)) return;
+  dkv(ft, ar(parse_b("addr",4,62)), FT_addr);
+  dkv(ft, ar(parse_b("sz",2,62)),   FT_sz);
+  dkv(ft, ar(parse_b("cap",3,62)),  FT_cap);
+  dkv(ft, ar(parse_b("h",1,62)),    FT_h);
+  dkv(ft, ar(parse_b("fn",2,62)),   FT_fn);
 }
 void ir(Q q){ if(ip(q)){ptr(q)[3]++;}return;}
 void dr(Q q){ 
@@ -548,11 +601,15 @@ D find_empty_ft_slot(){
   for(D i=0; i<idx; i++){
     if(pi(FT_addr, i) == 0) return i;
   }
-  xn(FT_addr, 1);
-  xn(FT_sz, 1);
-  xn(FT_cap, 1);
-  xn(FT_h, 1);
-  xn(FT_fn, 1);
+  Q old_addr = FT_addr, old_sz = FT_sz, old_cap = FT_cap, old_h = FT_h, old_fn = FT_fn;
+  FT_addr = xn(FT_addr, 1);
+  FT_sz   = xn(FT_sz, 1);
+  FT_cap  = xn(FT_cap, 1);
+  FT_h    = xn(FT_h, 1);
+  FT_fn   = xn(FT_fn, 1);
+  if(FT_addr!=old_addr || FT_sz!=old_sz || FT_cap!=old_cap || FT_h!=old_h || FT_fn!=old_fn){
+    ft_refresh_dict();
+  }
   return idx;
 }
 
@@ -732,7 +789,7 @@ Q file_read_log(Q f){
     obj_ptr |= ((Q)fid << 44); // Inject file ID
 
     // Append the discovered object's pointer to our result list
-    xn(result_list, 1);
+    result_list = xn(result_list, 1);
     zid(result_list, n(result_list)-1, obj_ptr);
 
     // Calculate the space this object took on disk to find the next one
@@ -1152,7 +1209,11 @@ Q E(Q** q, C tc){
   Q r = 0;D clp=LP;
   while(**q && !(34==t(**q)&&tc==dc(**q))){
     r=e(q);
-    if(tc==')'){Q l=NL[clp];D idx=n(l);xn(l,1);zid(l,idx,r);}
+    if(tc==')'){
+      Q l=NL[clp];D idx=n(l);
+      Q l2=xn(l,1); if(34==t(l2)) return l2; if(l2!=l) NL[clp]=l2;
+      zid(NL[clp],idx,r);
+    }
     while(**q && !(34==t(**q) && dc(**q)==';')) { // Find the end of the evaluated expression
       if(34==t(**q) && tc==dc(**q)){printf("early return found %c %d\n",tc,clp);(*q)++;return r;}    // if we find the ending character then break from the loop without advancing past that character
       (*q)++; 

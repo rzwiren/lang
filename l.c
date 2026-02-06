@@ -47,13 +47,13 @@ Q* ptr(Q q){
   return AB[a]+(hp(a,q)*AQ[a]);
 }
 
-B ip(Q q){return q&&!(15&q);}                                                  // Is this Q a pointer? nonzero in low 3 bits means atom
+B ip(Q q){return q&&!(15&q);}                                                 // Is this Q a pointer? nonzero in low 4 bits means atom
 B itp(Q q){return ip(q) && ha(q)==0;}                                         // Is this Q a pointer to the bump allocated region?
 B*p(Q q){return (B*)(ptr(q)+6);}                                              // pointers point at header after decoding and need to be adjusted to point at the data
-Q di(Q q){return q>>4;}                                                        // shift out the flags. decodes small integers
-Q dv(Q q){return q>>6;}                                                        // verbs are grammatical type, subtype 0. payload in high 59 bits
+Q di(Q q){return q>>4;}                                                       // shift out the flags. decodes small integers
+Q dv(Q q){return q>>6;}                                                       // verbs are grammatical type, subtype 0. payload in high 59 bits
 Q da(Q q){return q>>6;}
-Q dc(Q q){return q>>6;}                                                        // controls are grammatical type, subtype 2. payload in high 59 bits
+Q dc(Q q){return q>>6;}                                                       // controls are grammatical type, subtype 2. payload in high 59 bits
 
 Q ar(Q r){return (r<<4)|1;}                                                   // create an atom of type 1 (reference)
 Q av(Q v){return (v<<6)|2;}                                                   // create a verb atom (grammatical type 2, subtype 0)
@@ -71,19 +71,23 @@ Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach
 #define AR_FID(x) ((x)>>8)
 #define MK_AR(a, f) (((Q)(f)<<8)|(a))
 
-B ia(Q q){return !ip(q);}                                                     // is atom  from pointer
-B t(Q q){
-  if(!ia(q))return ptr(q)[0];
+B ii(Q q){return !ip(q);}                                                     // is immediate  from pointer
+B t(Q q){                                                                     // type      from pointer or header
+  if(ip(q))return ptr(q)[0];
   B tag=q&15;
   if(tag==2)return q&63;
   return tag;
 }
-B sh(Q q){return ia(q)?0:ptr(q)[1];}                                           // shape    from header
-B ls(Q q){return ia(q)?3:ptr(q)[2];}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
+B sh(Q q){return ii(q)?0:ptr(q)[1];}                                           // shape    from header
+B ls(Q q){return ii(q)?3:ptr(q)[2];}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
 B sz(Q q){return 1<<ls(q);}                                                    // bytesz   from logeltsz
-D rc(Q q){return !q?0:ia(q)?1:ptr(q)[3];}                                      // refcnt   from header
+D rc(Q q){return !q?0:ii(q)?1:ptr(q)[3];}                                      // refcnt   from header
 D n(Q a){B s=sh(a);return 0==s?1:ptr(a)[4];}                                   // length   from header
 D cp(Q a){B s=sh(a);return 0==s?1:ptr(a)[5];}                                  // capacity from header
+
+B is(Q q){return 0==sh(q);}
+B iv(Q q){return 1==sh(q);}
+B id(Q q){return 2==sh(q);}
 
 void ir(Q q);void dr(Q q); 
 
@@ -458,7 +462,7 @@ static void ft_refresh_dict(){
 }
 void ir(Q q){ if(ip(q)){ptr(q)[3]++;}return;}
 void dr(Q q){ 
-  if(!q || ia(q)){return;}                                                    // if null or atom just return
+  if(!q || ii(q)){return;}                                                    // if null or atom just return
   if(0< --ptr(q)[3]){return;}                                                 // if there is a nonzero refcount return
   if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                              // this object has refcount==0. if type 0, recurse on children
   if(1==ha(q))buddyfree(q);                                                   // then free this q
@@ -846,7 +850,7 @@ DV VD[VTZ];
 MV VM[VTZ];
 
 Q id(B A,Q v,Q w){return w;}
-Q en(B A,Q v,Q w){B aw=ia(w);Q z=vna(0,aw?t(w):0,ls(w),1);if(aw){pid(z,0,di(w));}else{zid(z,0,w);};return z;}
+Q en(B A,Q v,Q w){B aw=ii(w);Q z=vna(0,aw?t(w):0,ls(w),1);if(aw){pid(z,0,di(w));}else{zid(z,0,w);};return z;}
 Q tp(B A,Q v,Q w){return an(t(w));}
 Q ct(B A,Q v,Q w){return an(n(w));}
 
@@ -918,7 +922,7 @@ Q nt_aa(Q w){return !w;}
 Q nt(B A,Q v,Q w){ return math_m(w,nt_aa); }
 
 Q tl(B A,Q v,Q w){
-  B aw=ia(w);if(aw){w=en(A,av(8),w);};D nw=n(w);Q z=lna(A,nw);
+  B aw=ii(w);if(aw){w=en(A,av(8),w);};D nw=n(w);Q z=lna(A,nw);
   for(D i=0;i<nw;i++){
     Q ni=pi(w,i);Q zi=vna(0,3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
     zid(z,i,zi);
@@ -927,7 +931,7 @@ Q tl(B A,Q v,Q w){
 }
 
 Q at(B A,Q v,Q a,Q w){
-  B aa=ia(a),aw=ia(w);B tz=t(a);B nz=n(w);B shz=sh(w);
+  B aa=ii(a),aw=ii(w);B tz=t(a);B nz=n(w);B shz=sh(w);
   if(aw){return aa?a:qi(a,ra(w));} // TODO: arena awareness
   Q z=vna(0,t(a),ls(a),nz);
   for(D i=0;i<nz;i++){ // unmerge this. use shape of w to dispatch. 
@@ -986,12 +990,12 @@ Q ca(B A,Q v,Q a,Q w){
   if(t(a)==9) return file_append(a,w);
   // Arena-aware concatenation
   Q dest_ar = 0; // Default to temporary arena
-  if (!ia(a)) {
+  if (!ii(a)) {
     B ha_a = ha(a);
     if (ha_a == 2) dest_ar = MK_AR(2, a >> 44);
     else dest_ar = ha_a;
   }
-  if (!ia(w)) {
+  if (!ii(w)) {
     B ha_w = ha(w);
     if (ha_w == 2) {
       if (AR_ID(dest_ar) != 2) dest_ar = MK_AR(2, w >> 44);
@@ -1031,7 +1035,7 @@ Q sc(B A,Q v,Q a,Q w){
   return z;
 }
 Q lfa(B A,Q v,Q a,Q w){
-  if(ia(w))return a?dispatch_dyad(v,a,w):dispatch_monad(v,w);
+  if(ii(w))return a?dispatch_dyad(v,a,w):dispatch_monad(v,w);
   D nw=n(w);Q z=ln(nw);
   for(D i=0;i<nw;i++){
     Q wi=qi(w,i);
@@ -1043,7 +1047,7 @@ Q lfa(B A,Q v,Q a,Q w){
 Q lvs(B A,Q v,Q a,Q w){
   if(a)return ac(2);
   Q h=dispatch_monad(v,w);
-  if(ia(w)){Q z=ln(1);zid(z,0,h);return z;}
+  if(ii(w)){Q z=ln(1);zid(z,0,h);return z;}
   D nw=n(w);
   Q s=ln(nw);
   D md=0;
@@ -1070,7 +1074,7 @@ Q lvl(B A,Q v,Q a,Q w){
   if(!a)return dispatch_monad(v,w);
   D d=di(a);
   if(0==d)return dispatch_monad(v,w);
-  if(ia(w))return dispatch_monad(v,w);
+  if(ii(w))return dispatch_monad(v,w);
   D nw=n(w);Q z=ln(nw);
   for(D i=0;i<nw;i++){
     Q r=lvl(A,v,an(d-1),qi(w,i));
@@ -1081,7 +1085,7 @@ Q lvl(B A,Q v,Q a,Q w){
 Q lsl(B A,Q v,Q a,Q w){
   D limit=a?di(a):0;
   Q h=dispatch_monad(v,w);
-  if(0==limit||ia(w)){Q z=ln(1);zid(z,0,h);return z;}
+  if(0==limit||ii(w)){Q z=ln(1);zid(z,0,h);return z;}
   D nw=n(w);
   Q s=ln(nw);
   D md=0;

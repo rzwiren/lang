@@ -18,9 +18,7 @@ typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typ
 typedef long long J; typedef int I; typedef short H;
 typedef Q(*RDO)(Q,Q);                                                           // function pointer for raw dyadic operation
 typedef Q(*RMO)(Q);                                                             // function pointer for raw monadic operation
-typedef Q(*DV)(B,Q,Q,Q);                                                        // function pointer for dyadic verb (arena;verb;alpha;omega)
-typedef Q(*MV)(B,Q,Q);                                                          // function pointer for monadic verb (arena;verb;omega)
-typedef Q(*ADV)(B,Q,Q,Q);                                                       // function pointer for adverb (arena;verb;alpha;omega)
+typedef Q(*VF)(B,Q,Q,Q);                                                        // function pointer for verb/adverb (arena;verb;alpha;omega)
 
 #define BUMP_UNIT_BYTES   16
 #define BUDDY_UNIT_BYTES  4096
@@ -87,7 +85,7 @@ D cp(Q a){B s=sh(a);return 0==s?1:ptr(a)[5];}                                  /
 
 B is(Q q){return 0==sh(q);}
 B iv(Q q){return 1==sh(q);}
-B id(Q q){return 2==sh(q);}
+B iD(Q q){return 2==sh(q);}
 
 void ir(Q q);void dr(Q q); 
 
@@ -268,16 +266,14 @@ Q filebumpalloc(B t, B s, B z, D n, D c, Q ar) {
 
     Q off_units = off_bytes / 16;
 
-    B ptr_tag = 0;
-
-    return ((Q)fid << 44) | (off_units << 6) | (2 << 4) | ptr_tag;
+    return ((Q)fid << 44) | (off_units << 6) | (2 << 4) | 0;
 }
 
 Q tsna(Q ar, B t, B s, B z, D n, D c){
   B a = AR_ID(ar);
   if(a==2) return filebumpalloc(t,s,z,n,c,ar);
   if(a==1) return buddyalloc(t,s,z,n,c,ar);
-  return bumpalloc(t,s,z,n,c,ar);
+  return bumpalloc(t,s,z,n,c,ar); // TODO: return 
 }
 Q vna(Q ar, B t, B z, D n){ return tsna(ar, t, 1, z, n, cn(t,1,n)); }
 Q lna(Q ar, D n){ return vna(ar, 0, 3, n); }
@@ -649,7 +645,7 @@ Q file_append(Q a, Q w);
 Q file_log(Q a, Q w);
 Q file_read_log(Q f);
 
-Q fl(B A, Q v, Q w){
+Q fl(B A, Q v, Q a, Q w){
   if(t(w)!=6){printf("file: filename must be string\n"); return ac(2);}
   char fn[256]; D fn_len = n(w); if(fn_len > 255) fn_len = 255;
   for(D i=0; i<fn_len; i++) fn[i] = (char)pi(w,i); fn[fn_len] = 0;
@@ -729,8 +725,8 @@ Q file_read(Q f){
   }
   return root;
 }
-Q ld(B A, Q v, Q w){
-  Q f = fl(A,v,w);
+Q ld(B A, Q v, Q a, Q w){
+  Q f = fl(A,v,0,w);
   if(t(f)==2 && dc(f)==2) return f;
   return file_read(f);
 }
@@ -809,7 +805,7 @@ Q file_read_log(Q f){
 }
 
 #define VTZ 25
-#define ATZ 15
+#define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 void pr_b(Q q,D b){if(q<b){printf("%c",MAP[q]);return;}pr_b(q/b,b);printf("%c",MAP[q%b]);}
@@ -830,7 +826,21 @@ void pr(Q q){
     }
   }
   if(1==t(q)){pr_b(ip(q)?pi(q,0):di(q),62);}
-  if(2==t(q)){printf("%s",VT[dv(q)]);}
+  if(2==t(q)){
+    Q v=q;
+    D advs[32];D nadv=0;
+    while(dv(v)>=(Q)VTZ && nadv<32){
+      Q x=dv(v)-(Q)VTZ;
+      advs[nadv++]=(D)(x%(Q)ATZ)+1;
+      v=av(x/(Q)ATZ);
+    }
+    Q base=dv(v);
+    printf("%s", base<(Q)VTZ ? VT[base] : "?");
+    for(D i=nadv;i>0;--i){
+      D ai=advs[i-1];
+      if(ai<(D)ATZ) printf("%s",AT[ai]);
+    }
+  }
   if(18==t(q)){printf("%s",AT[da(q)]);}
   if(34==t(q)){printf("control: %c\n",(char)dc(q));}
   if(9==t(q)){printf("file:%d", (int)AR_FID(di(q)));}
@@ -846,18 +856,21 @@ void pr(Q q){
   if(5==t(q)){printf("hash table: ");for(D i=0;i<cp(q);i++){printf("%d:%lld ",i,pi(q,i));}printf("\n");}
   if(7==t(q)){printf("`");pr_b(ip(q)?pi(q,0):di(q),62);}
 }
-DV VD[VTZ];
-MV VM[VTZ];
+VF VD[VTZ];
+VF VM[VTZ];
+extern VF AV[ATZ];
 
-Q id(B A,Q v,Q w){return w;}
-Q en(B A,Q v,Q w){B aw=ii(w);Q z=vna(0,aw?t(w):0,ls(w),1);if(aw){pid(z,0,di(w));}else{zid(z,0,w);};return z;}
-Q tp(B A,Q v,Q w){return an(t(w));}
-Q ct(B A,Q v,Q w){return an(n(w));}
-
-Q dispatch_monad(Q v,Q w);
-Q dispatch_dyad(Q v,Q a,Q w);
+Q id(B A,Q v,Q a,Q w){return w;}
+Q en(B A,Q v,Q a,Q w){B aw=ii(w);Q z=vna(0,aw?t(w):0,ls(w),1);if(aw){pid(z,0,di(w));}else{zid(z,0,w);};return z;}
+Q tp(B A,Q v,Q a,Q w){return an(t(w));}
+Q ct(B A,Q v,Q a,Q w){return an(n(w));}
 
 typedef enum {NB,DB,LB,RB,MB} BM;                                                       // broadcast mode (NB = no implicit lift)
+static const BM VBM[VTZ];
+static const BM VBD[VTZ];
+
+Q dispatch(VF* Vtab, const BM* Btab, Q v, Q a, Q w);
+
 static inline Q vb_rebuild_dict(B A, Q d, Q new_vals){
   Q zd=dnu(0,3,0,A);
   Q *hh=ptr(pi(d,0));Q hc=tsna(A,hh[0],hh[1],hh[2],hh[4],hh[5]);
@@ -868,7 +881,7 @@ static inline Q vb_rebuild_dict(B A, Q d, Q new_vals){
   return zd;
 }
 
-static inline B vb_implicit_needed(Q q){ return t(q)==0 && sh(q)!=0; } // boxed list or dict
+static inline B vb_implicit_needed(Q q){ return q && !ii(q) && t(q)==0; }
 
 static inline B vb_need_for(BM m, Q a, Q w){
   switch(m){
@@ -881,19 +894,40 @@ static inline B vb_need_for(BM m, Q a, Q w){
   }
 }
 
+// Derived verbs (verb+adverb chains) are encoded as a base-ATZ digit stream with an offset of VTZ.
+// This avoids hard-coding magic numbers and keeps encode/decode consistent when VTZ/ATZ change.
+static inline Q derive_verb(Q v, Q adv_atom){
+  D ai = (D)da(adv_atom);
+  // adverb ids start at 1; 0 is reserved/unused
+  if(!ai) return v;
+  return av(dv(v) * (Q)ATZ + (Q)(ai - 1) + (Q)VTZ);
+}
+
+static inline void decode_derived_verb(Q v, Q* base_out, D* adv_idx_out){
+  Q r = dv(v);
+  Q x = r - (Q)VTZ;
+  *base_out = av(x / (Q)ATZ);
+  *adv_idx_out = (D)(x % (Q)ATZ) + 1; // maps digit back to adverb id (1..ATZ-1)
+}
+
+static inline Q apply_raw(VF* Vtab, Q v, Q a, Q w){
+  Q r=dv(v);
+  if(r<(Q)VTZ) return Vtab && Vtab[r] ? Vtab[r](0, v, a, w) : ac(2);
+  Q b=0; D idx=0;
+  decode_derived_verb(v, &b, &idx);
+  return AV[idx] ? AV[idx](0, b, a, w) : ac(2);
+}
+
 Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
-  B ta=t(a),tw=t(w),sa=sh(a),sw=sh(w);
+  B sa=sh(a),sw=sh(w);
   D na=2==sa?n(pi(a,1)):n(a), nw=2==sw?n(pi(w,1)):n(w);
   if(DB==m && na!=nw && sa && sw){printf("vb length\n");return ac(2);}
 
   // Force broadcast for explicit adverbs (d>0). For implicit lifting (d<0), only lift on boxed args.
-  B ib = d>0 ? 1 : (DB==m ? (vb_implicit_needed(a)||vb_implicit_needed(w))
-                         : RB==m ? vb_implicit_needed(w)
-                         : LB==m ? vb_implicit_needed(a)
-                                 : vb_implicit_needed(w));
+  B ib = d>0 ? 1 : vb_need_for(m, a, w);
   if(!ib){
     // No lift: behave like normal application (useful for explicit each on atoms).
-    return (MB==m) ? dispatch_monad(v,w) : dispatch_dyad(v,a,w);
+    return (MB==m) ? apply_raw(VM, v, 0, w) : apply_raw(VD, v, a, w);
   }
 
   D nz=DB==m?(sa?na:nw):RB==m?nw:LB==m?na:nw;
@@ -901,7 +935,12 @@ Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
   for(D i=0;i<nz;i++){
     Q ai=(m!=RB && 1==sa)?qi(a,i):(m!=RB && 2==sa)?qi(pi(a,2),i):a;
     Q wi=(m!=LB && 1==sw)?qi(w,i):(m!=LB && 2==sw)?qi(pi(w,2),i):w;
-    Q zi = (MB==m) ? dispatch_monad(v, wi) : dispatch_dyad(v, ai, wi);
+    Q zi;
+    if(d<0 && m!=NB && vb_need_for(m, ai, wi)){
+      zi = vb(0, v, ai, wi, m, -1);
+    }else{
+      zi = (MB==m) ? apply_raw(VM, v, 0, wi) : apply_raw(VD, v, ai, wi);
+    }    
     if(34==t(zi)) return zi;
     zid(z,i,zi);
   }
@@ -910,7 +949,7 @@ Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
   return z;
 }
 
-Q car(B A,Q v,Q w){return 0==sh(w)?w:qi(w,0);}
+Q car(B A,Q v,Q a,Q w){return 0==sh(w)?w:qi(w,0);}
 
 Q math_m(Q w,RMO op){ // TODO: arena awareness
   if(0==sh(w)){return an(op(ra(w)));}
@@ -919,19 +958,19 @@ Q math_m(Q w,RMO op){ // TODO: arena awareness
   return z;
 }
 Q nt_aa(Q w){return !w;}
-Q nt(B A,Q v,Q w){ return math_m(w,nt_aa); }
+Q nt(B A,Q v,Q a,Q w){ return math_m(w,nt_aa); }
 
-Q tl(B A,Q v,Q w){
-  B aw=ii(w);if(aw){w=en(A,av(8),w);};D nw=n(w);Q z=lna(A,nw);
+Q tl(B A,Q v,Q a,Q w){
+  B aw=ii(w);if(aw){w=en(A,av(8),0,w);};D nw=n(w);Q z=lna(A,nw);
   for(D i=0;i<nw;i++){
     Q ni=pi(w,i);Q zi=vna(0,3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
     zid(z,i,zi);
   }
-  return aw?car(A,av(6),z):z;
+  return aw?car(A,av(6),0,z):z;
 }
 
 Q at(B A,Q v,Q a,Q w){
-  B aa=ii(a),aw=ii(w);B tz=t(a);B nz=n(w);B shz=sh(w);
+  B aa=ii(a),aw=ii(w);B nz=n(w);
   if(aw){return aa?a:qi(a,ra(w));} // TODO: arena awareness
   Q z=vna(0,t(a),ls(a),nz);
   for(D i=0;i<nz;i++){ // unmerge this. use shape of w to dispatch. 
@@ -978,8 +1017,8 @@ Q or(B A,Q v,Q a,Q w){ return math(a,w,or_aa); }
 Q xr(B A,Q v,Q a,Q w){ return math(a,w,xr_aa); }
 Q sb(B A,Q v,Q a,Q w){ return math(a,w,sb_aa); }
 
-Q bn(B A,Q v,Q w){ return math_m(w,bn_aa); }
-Q ng(B A,Q v,Q w){ return math_m(w,ng_aa); }
+Q bn(B A,Q v,Q a,Q w){ return math_m(w,bn_aa); }
+Q ng(B A,Q v,Q a,Q w){ return math_m(w,ng_aa); }
 
 Q set(Q a,Q w,D sp){
   dkv(SC[sp],a,w);
@@ -988,27 +1027,11 @@ Q set(Q a,Q w,D sp){
 
 Q ca(B A,Q v,Q a,Q w){
   if(t(a)==9) return file_append(a,w);
-  // Arena-aware concatenation
-  Q dest_ar = 0; // Default to temporary arena
-  if (!ii(a)) {
-    B ha_a = ha(a);
-    if (ha_a == 2) dest_ar = MK_AR(2, a >> 44);
-    else dest_ar = ha_a;
-  }
-  if (!ii(w)) {
-    B ha_w = ha(w);
-    if (ha_w == 2) {
-      if (AR_ID(dest_ar) != 2) dest_ar = MK_AR(2, w >> 44);
-    } else if (ha_w > AR_ID(dest_ar) && AR_ID(dest_ar) != 2) {
-      dest_ar = ha_w;
-    }
-  }
-
   if (t(w)==9) w = file_read(w); // If w is a file, read its root
 
   B tz = (t(a)==t(w)) ? t(a) : 0;
   D j=0; D na=n(a), nw=n(w);
-  Q z = vna(dest_ar, tz, tz ? ls(a) : 3, na+nw);
+  Q z = vna(A, tz, tz ? ls(a) : 3, na+nw);
   for(D i=0;i<na;i++,j++){Q ai=at(A,av(3),a,an(i));qid(z,j,tz?ra(ai):ai);} // decode if not type 0
   for(D i=0;i<nw;i++,j++){Q wi=at(A,av(3),w,an(i));qid(z,j,tz?ra(wi):wi);} // decode if atom or somethig
   return z;
@@ -1016,26 +1039,28 @@ Q ca(B A,Q v,Q a,Q w){
 
 Q el(B A,Q v,Q a,Q w){return vb(A,v,a,w,LB,1);}
 Q er(B A,Q v,Q a,Q w){return vb(A,v,a,w,RB,1);}
-Q ed(B A,Q v,Q a,Q w){return vb(A,v,a,w,DB,1);}
-Q em(B A,Q v,Q a,Q w){return vb(A,v,0,w,MB,1);}
+Q ed(B A,Q v,Q a,Q w){return vb(A,v,a,w,a?DB:MB,1);}
 Q ov(B A,Q v,Q a,Q w){
-  if(0==sh(w))return dispatch_monad(v,w);
-  D nw=n(w);if(0==nw){if(a)return a;printf("ov empty\n");return ac(2);}
+  D nw=n(w),sw=sh(w);
+  if(0==nw){return a?a:w;}
+  if(0==sw && !a){return w;} 
   Q acc;D i=0;
-  if(a){acc=a;}else{acc=qi(w,0);i=1;} // TODO: arena awareness
-  for(;i<nw;i++){acc=dispatch_dyad(v,acc,qi(w,i));}
+  if(a){acc=a;}else{acc=qi(w,0);i=1;}
+  for(;i<nw;i++){acc=dispatch(VD, VBD, v, acc, qi(w,i));}
   return acc;
 }
 Q sc(B A,Q v,Q a,Q w){
-  if(0==sh(w))return dispatch_monad(v,w);
-  D nw=n(w);D zn=a?nw+1:nw;Q z=ln(zn);
+  D nw=n(w),sw=sh(w);
+  if(0==nw){return a?a:w;}
+  if(0==sw && !a){return w;} 
+  D zn=a?nw+1:nw;Q z=ln(zn);
   Q acc;D i=0;D j=0;
-  if(a){acc=a;zid(z,j++,acc);}else{acc=qi(w,0);zid(z,j++,acc);i=1;} // TODO: arena awareness
-  for(;i<nw;i++){acc=dispatch_dyad(v,acc,qi(w,i));zid(z,j++,acc);}
+  if(a){acc=a;zid(z,j++,acc);}else{acc=qi(w,0);zid(z,j++,acc);i=1;}
+  for(;i<nw;i++){acc=dispatch(VD, VBD, v, acc, qi(w,i));zid(z,j++,acc);}
   return z;
 }
 Q lfa(B A,Q v,Q a,Q w){
-  if(ii(w))return a?dispatch_dyad(v,a,w):dispatch_monad(v,w);
+  if(ii(w))return a?dispatch(VD, VBD, v, a, w):dispatch(VM, VBM, v, 0, w);
   D nw=n(w);Q z=ln(nw);
   for(D i=0;i<nw;i++){
     Q wi=qi(w,i);
@@ -1046,7 +1071,7 @@ Q lfa(B A,Q v,Q a,Q w){
 }
 Q lvs(B A,Q v,Q a,Q w){
   if(a)return ac(2);
-  Q h=dispatch_monad(v,w);
+  Q h=dispatch(VM, VBM, v, 0, w);
   if(ii(w)){Q z=ln(1);zid(z,0,h);return z;}
   D nw=n(w);
   Q s=ln(nw);
@@ -1071,10 +1096,10 @@ Q lvs(B A,Q v,Q a,Q w){
   return z;
 }
 Q lvl(B A,Q v,Q a,Q w){
-  if(!a)return dispatch_monad(v,w);
+  if(!a)return dispatch(VM, VBM, v, 0, w);
   D d=di(a);
-  if(0==d)return dispatch_monad(v,w);
-  if(ii(w))return dispatch_monad(v,w);
+  if(0==d)return dispatch(VM, VBM, v, 0, w);
+  if(ii(w))return dispatch(VM, VBM, v, 0, w);
   D nw=n(w);Q z=ln(nw);
   for(D i=0;i<nw;i++){
     Q r=lvl(A,v,an(d-1),qi(w,i));
@@ -1084,7 +1109,7 @@ Q lvl(B A,Q v,Q a,Q w){
 }
 Q lsl(B A,Q v,Q a,Q w){
   D limit=a?di(a):0;
-  Q h=dispatch_monad(v,w);
+  Q h=dispatch(VM, VBM, v, 0, w);
   if(0==limit||ii(w)){Q z=ln(1);zid(z,0,h);return z;}
   D nw=n(w);
   Q s=ln(nw);
@@ -1113,7 +1138,7 @@ Q itr(B A,Q v,Q a,Q w){
   D n=di(a);
   Q r=w;
   for(D i=0;i<n;i++){
-    Q next=dispatch_monad(v,r);
+    Q next=dispatch(VM, VBM, v, 0, r);
     if(r!=w && r!=next)dr(r);
     r=next;
   }
@@ -1126,16 +1151,16 @@ Q its(B A,Q v,Q a,Q w){
   Q r=w;
   zid(z,0,r);
   for(D i=0;i<n;i++){
-    r=dispatch_monad(v,r);
+    r=dispatch(VM, VBM, v, 0, r);
     zid(z,i+1,r);
   }
   return z;
 }
 
 Q lg(B A, Q v, Q a, Q w);
-Q rl(B A, Q v, Q w);
-DV VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0};
-MV VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl};
+Q rl(B A, Q v, Q a, Q w);
+VF VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -1193,45 +1218,28 @@ static const BM VBD[VTZ]={
   /* 24 */ NB, // readlog
 };
 C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
-ADV AVD[ATZ]={0,0 ,ed,0 ,0 ,el,er,0  ,0  ,0,0,lvl,lsl,itr,its};
-ADV AVM[ATZ]={0,em,0 ,sc,ov,0 ,0 ,lvs,lfa,0,0,0  ,0  ,0  ,0  };
-C* AT[ATZ]={" ","'","T","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
 
-Q dispatch_monad(Q v,Q w){
+VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
+C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
+
+Q dispatch(VF* Vtab, const BM* Btab, Q v, Q a, Q w){
   Q r=dv(v);
-  if(r<32){
-    BM m = (r < VTZ) ? VBM[r] : NB;
-    if(m!=NB && vb_need_for(m, 0, w)) return vb(0, v, 0, w, m, -1);
-    return VM[r] ? VM[r](0,v,w) : ac(2);
-  }
-  D c=(r-32)%15;Q b=av((r-32)/15);
-  D idx=c+1;
-  if(AVM[idx])return AVM[idx](0,b,0,w);
-  if(AVD[idx])return ac(2); // projection not implemented
-  return ac(2);
-}
-Q dispatch_dyad(Q v,Q a,Q w){
-  Q r=dv(v);
-  if(r<32){
-    BM m = (r < VTZ) ? VBD[r] : NB;
+  if(r<VTZ){
+    BM m = Btab ? Btab[r] : NB;
     if(m!=NB && vb_need_for(m, a, w)) return vb(0, v, a, w, m, -1);
-    return VD[r] ? VD[r](0,v,a,w) : ac(2);
+    return apply_raw(Vtab, v, a, w);
   }
-  D c=(r-32)%15;Q b=av((r-32)/15);
-  D idx=c+1;
-  if(AVD[idx])return AVD[idx](0,b,a,w);
-  if(AVM[idx])return AVM[idx](0,b,a,w);
-  return ac(2);
+  return apply_raw(Vtab, v, a, w);
 }
 
 Q lg(B A, Q v, Q a, Q w){
-  Q f = fl(0, 0, a);
+  Q f = fl(0, 0, 0, a);
   if(t(f) == 34) return f;   // propagate file open error sentinel
   if(t(f) != 9) return ac(2);
   return file_log(f, w);
 }
-Q rl(B A, Q v, Q w){
-  Q f = fl(A, v, w);
+Q rl(B A, Q v, Q a, Q w){
+  Q f = fl(A, v, 0, w);
   if(t(f) == 34) return f;
   if(t(f) != 9) return ac(2);
   return file_read_log(f);
@@ -1265,21 +1273,21 @@ Q ecl(Q** q){Q l=NL[LP];if(LP > 0) LP--;return l;}
 
 Q emv(Q** q){
   Q v=*(*q)++;
-  while(18==t(**q)){v=av(dv(v)*15+(da(*(*q)++)-1)+32);}
+  while(18==t(**q)){v=derive_verb(v,*(*q)++);}
   Q w=e(q);
   if(4==t(w)){Q p=tsna(0,4,1,3,1,1);pid(p,0,v);return ca(0,av(8),p,w);}
-  Q r=dispatch_monad(v,w);
+  Q r=dispatch(VM, VBM, v, 0, w);
   return r;
 }
 
 Q edv(Q a,Q** q){
   D current_sp = SP;Q v=*(*q)++;
-  while(18==t(**q)){v=av(dv(v)*15+(da(*(*q)++)-1)+32);}                                                        // Cache the scope pointer before evaluating the right-hand side.
+  while(18==t(**q)){v=derive_verb(v,*(*q)++);}                                                         // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q);
   if(4==t(w)&&(7!=dv(v))){Q p=tsna(0,4,1,3,2,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
   a=((1==t(a))&&(7!=dv(v)))?dk(SC[current_sp],a):a;
   if(7==dv(v)){return set(a,w,current_sp);}                                     // If this is an assignment, use the cached scope pointer to write into the correct scope.
-  Q r=dispatch_dyad(v,a,w);
+  Q r=dispatch(VD, VBD, v, a, w);
   return r;
 }
 

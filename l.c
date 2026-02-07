@@ -1,5 +1,8 @@
 // cl l.c /GL /O1 /Gy /MD /DNDEBUG /link /LTCG /OPT:REF /OPT:ICF
 // cc -fsanitize=address l.c -o l_lin
+#if defined(_MSC_VER)
+  #define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -88,6 +91,10 @@ B iv(Q q){return 1==sh(q);}
 B iD(Q q){return 2==sh(q);}
 
 void ir(Q q);void dr(Q q); 
+
+static inline B ends_with_dot_l(const char* s);
+static inline B qstr_to_c(Q w, C* out, D out_cap);
+static Q eval_code_file(const char* fn);
 
 Q qbz(Q bz){return ((bz+15)/16)*2;}                                             // forward declare refcount helpers
 Q hz(){return sizeof(Q)*6;}                                                     // header size
@@ -273,7 +280,7 @@ Q tsna(Q ar, B t, B s, B z, D n, D c){
   B a = AR_ID(ar);
   if(a==2) return filebumpalloc(t,s,z,n,c,ar);
   if(a==1) return buddyalloc(t,s,z,n,c,ar);
-  return bumpalloc(t,s,z,n,c,ar); // TODO: return 
+  return bumpalloc(t,s,z,n,c,ar); // TODO: return fatal error for unknown arena instead of temp arena fallback
 }
 Q vna(Q ar, B t, B z, D n){ return tsna(ar, t, 1, z, n, cn(t,1,n)); }
 Q lna(Q ar, D n){ return vna(ar, 0, 3, n); }
@@ -431,7 +438,7 @@ Q dkv(Q d,Q k,Q v){
     D idx=e-1;
     Q old=pi(vq, idx);
     ir(v);
-    pid(vq, idx, v);
+    qid(vq, idx, v);
     dr(old);
     return v;
   }
@@ -464,12 +471,11 @@ void dr(Q q){
   if(1==ha(q))buddyfree(q);                                                   // then free this q
   return;                                                                     // should I consider returning a control sentinel here (type)
 }
-Q t2g(Q q){
-  Q q2a(Q dest_ar, Q q);
-  return q2a(1, q);
-}
 
 Q q2a(Q dest_ar, Q q); // Forward declare
+Q t2g(Q q){
+  return q2a(1, q);
+}
 
 static inline Q strip_fid(Q q){
     if (ip(q) && ha(q) == 2) return q & ((1ULL << 44) - 1);
@@ -571,6 +577,46 @@ void* os_map(char* fn, Q* sz, Q* h_out){
 #endif
   if(is_new && addr && *sz >= 16) memset(addr, 0, 16);
   return addr;
+}
+
+void* os_map_ro(char* fn, Q* sz, Q* h_out){
+  void* addr = 0;
+#if defined(_MSC_VER)
+  HANDLE hf = CreateFileA(fn, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if(hf == INVALID_HANDLE_VALUE) return 0;
+  LARGE_INTEGER li;
+  if(!GetFileSizeEx(hf, &li)) { CloseHandle(hf); return 0; }
+  *sz = (Q)li.QuadPart;
+  if(*sz == 0) { CloseHandle(hf); *h_out = 0; return (void*)1; } // sentinel for empty file
+  HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READONLY, 0, 0, NULL);
+  if(!hmap) { CloseHandle(hf); return 0; }
+  addr = MapViewOfFile(hmap, FILE_MAP_READ, 0, 0, 0);
+  CloseHandle(hmap);
+  if(!addr) { CloseHandle(hf); return 0; }
+  *h_out = (Q)hf;
+#else
+  int fd = open(fn, O_RDONLY);
+  if(fd < 0) return 0;
+  struct stat st;
+  if(fstat(fd, &st) < 0) { close(fd); return 0; }
+  *sz = (Q)st.st_size;
+  if(*sz == 0) { close(fd); *h_out = 0; return (void*)1; } // sentinel for empty file
+  addr = mmap(0, *sz, PROT_READ, MAP_PRIVATE, fd, 0);
+  if(addr == MAP_FAILED) { close(fd); return 0; }
+  *h_out = (Q)fd;
+#endif
+  return addr;
+}
+
+void os_unmap_ro(void* addr, Q sz, Q h){
+  if(!addr || addr==(void*)1) return;
+#if defined(_MSC_VER)
+  UnmapViewOfFile(addr);
+  CloseHandle((HANDLE)h);
+#else
+  munmap(addr, sz);
+  close((int)h);
+#endif
 }
 
 void os_unmap(D fid){
@@ -726,8 +772,14 @@ Q file_read(Q f){
   return root;
 }
 Q ld(B A, Q v, Q a, Q w){
+  if(t(w)!=6){printf("load: filename must be string\n"); return ac(2);}
+  C fn[1024];
+  if(!qstr_to_c(w, fn, (D)sizeof(fn))){printf("load: bad filename\n"); return ac(2);}
+  if(ends_with_dot_l(fn)){
+    return eval_code_file(fn);
+  }
   Q f = fl(A,v,0,w);
-  if(t(f)==2 && dc(f)==2) return f;
+  if(t(f)==34 && dc(f)==2) return f;
   return file_read(f);
 }
 Q file_append(Q a, Q w){
@@ -1254,7 +1306,6 @@ Q eoc(Q** q){
   SP++;D csp=SP;                                                            // cache the SP of this new allocation, return that.
   SC[SP] = dn(0,3,0,0);                                                       // Allocate new dictionary for the new scope
   E(q,'}');                                                               // Evaluate the inner expression
-  //if(**q && 34==t(**q) && dc(**q)=='}'){ printf("eoc advanced past }\n");(*q)++;}
   return SC[csp];                                                           // Return the created dictionary
 }
 
@@ -1266,7 +1317,6 @@ Q eol(Q** q){
   LP++;D clp=LP;
   NL[LP] = vca(0, 0, 3, 64);
   E(q,')');
-  //if(**q && 34==t(**q) && dc(**q)==')'){printf("eol advanced past )\n"); (*q)++; }// if we landed on ')' advance theh pointer by 1 at the end.
   return NL[clp];
 }
 Q ecl(Q** q){Q l=NL[LP];if(LP > 0) LP--;return l;}
@@ -1294,6 +1344,8 @@ Q edv(Q a,Q** q){
 Q E(Q** q, C tc){
   Q r = 0;D clp=LP;
   while(**q && !(34==t(**q)&&tc==dc(**q))){
+    while(**q && 34==t(**q) && dc(**q)==';') (*q)++; // ignore empty statements
+    if(!**q || (34==t(**q)&&tc==dc(**q))) break;
     r=e(q);
     if(tc==')'){
       Q l=NL[clp];D idx=n(l);
@@ -1361,8 +1413,6 @@ Q parse_b(C* s, D len, D base){
 // CClass(cc):0-nul,1-spc,2-alp,3-dig,4-dot,5-qot,6-bqt,7-ver,8-ctl,9-adv,10-oth,11-neg
 // Character class lookup table. Maps ASCII chars ' ' (32) to '~' (126) to a class index.
 //              !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
-// static C* CST="1757AA7988777B49333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
-// D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
 static C* CST="1757AA7988777B49333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
 D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc>=128)return 4;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
 D TT[9][12]={ // Transition Table
@@ -1385,30 +1435,116 @@ Q pn(C* s, D len){
   for(D i=0;i<c;i++){while(*p==' ')p++;C* t=p;while(*p&&*p!=' ')p++;pid(z,i,parse_b(t,p-t,10));}
   return z;
 }
-Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:state
+static inline B ends_with_dot_l(const char* s){
+  if(!s) return 0;
+  size_t n = strlen(s);
+  if(n < 2) return 0;
+  C c0 = s[n-2], c1 = s[n-1];
+  if(c0 != '.') return 0;
+  if(c1 >= 'A' && c1 <= 'Z') c1 = (C)(c1 - 'A' + 'a');
+  return c1 == 'l';
+}
+
+static inline B qstr_to_c(Q w, C* out, D out_cap){
+  if(!out || !out_cap) return 0;
+  if(t(w)!=6) return 0;
+  D n_w = n(w);
+  if(n_w >= out_cap) n_w = out_cap - 1;
+  for(D i=0;i<n_w;i++) out[i] = (C)pi(w,i);
+  out[n_w] = 0;
+  return 1;
+}
+
+static inline D ascii_adv_id(const C* p){
+  C a=p[0], b=p[1];
+  if(a=='-' && b=='>') return 2;   // →
+  if(a=='<' && b=='-') return 3;   // ←
+  if(a=='<' && b=='\'') return 4;  // ↰
+  if(a=='\''&& b=='>') return 5;   // ↱
+  if(a=='\''&& b=='v') return 6;   // ↓
+  if(a=='\''&& b=='^') return 7;   // ↑
+  if(a=='<' && b=='o') return 8;   // ↺
+  if(a=='o' && b=='>') return 9;   // ↻
+  if(a=='/' && b=='\'') return 10; // ↿
+  if(a=='\\'&& b=='\'') return 11; // ⇃
+  if(a=='<' && b=='p') return 12;  // ↫
+  if((a=='p' || a=='q') && b=='>') return 13;  // ↬ (support both p> and q>)
+  return 0;
+}
+
+Q* lx_len(const C* b, D l);
+
+static Q eval_code_tape(const C* src, D len){
+  if(!src || !len) return 0;
+  if(len >= 3 && (B)src[0]==0xEF && (B)src[1]==0xBB && (B)src[2]==0xBF){ src += 3; len -= 3; } // skip UTF-8 BOM
+  Q* tokens_base = lx_len(src, len);
+  Q* tokens = tokens_base;
+  Q r = E(&tokens, '\0');
+  free(tokens_base);
+  return r;
+}
+
+static Q eval_code_file(const char* fn){
+  if(!fn) return ac(2);
+  Q sz=0, h=0;
+  void* addr = os_map_ro((char*)fn, &sz, &h);
+  if(!addr) { printf("load: map failed: %s\n", fn); return ac(2); }
+  Q r = (addr==(void*)1) ? 0 : eval_code_tape((const C*)addr, (D)sz);
+  os_unmap_ro(addr, sz, h);
+  return r;
+}
+
+Q* lx_len(const C* b, D l){
+  Q*q=malloc(sizeof(Q)*(l+1));D qi=0;const C*p=b;const C* end=b+l;D st=0; // st:state
   while(st!=7){
-    if((B)*p==0xE2){
+    if(p>=end){st=7;break;}
+
+    // Statement separators: treat both ';' and newlines as the same separator token.
+    if(*p=='\n'){q[qi++]=ac(';');p++;st=0;continue;}
+    if(*p=='\r'){q[qi++]=ac(';');p++;if(p<end && *p=='\n')p++;st=0;continue;}
+    if(*p==';'){q[qi++]=ac(';');p++;st=0;continue;}
+    if(*p=='\t'){p++;continue;}
+
+    if((end-p)>=2){
+      D ai2=ascii_adv_id(p);
+      if(ai2){q[qi++]=aa(ai2);p+=2;st=0;continue;}
+    }
+
+    if((B)*p==0xE2 && (end-p)>=3){
       C t[4];t[0]=p[0];t[1]=p[1];t[2]=p[2];t[3]=0;
       D ai=FA(t);
       if(ai){q[qi++]=aa(ai);p+=3;st=0;continue;}
     }
-    C*s=p;D cc=cl(*p);st=TT[0][cc]; // s:token start
+    C*s=(C*)p;D cc=cl(*p);st=TT[0][cc]; // s:token start
     if(st==0){p++;continue;} // whitespace
     if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(FA(ts));p++;st=0;continue;} // verbs, controls, adverbs
     while(st!=7){
-      p++;cc=cl(*p);D next_st=TT[st][cc];
+      p++;
+      C c = (p<end) ? *p : 0;
+      if(st!=5 && (c=='\n' || c=='\r' || c=='\t' || c==';')) c=0; // token boundary at separators (except strings)
+      cc=cl(c);
+      D next_st=TT[st][cc];
       if(st==1&&next_st!=2){q[qi++]=V(*s);p=s+1;st=0;break;} // not a number, treat '-' as a verb
       if(next_st==7){ // End of token.
-        D len=p-s;C t[100];strncpy(t,s,len);t[len]='\0';
-        if(st==1||st==2||st==3||st==8) q[qi++]=pn(t,len);
-        else if(st==4){
-          D vi=FV(t);
-          D ai=FA(t);
-          if(vi) q[qi++]=av(vi); else if(ai) q[qi++]=aa(ai);
-          else q[qi++]=ar(parse_b(t,len,62));
+        D len=(D)(p-s);
+        if(st==1||st==2||st==3||st==8 || st==4){
+          C tmp_small[100];C* t=tmp_small;
+          if(len >= (D)sizeof(tmp_small)){
+            t=(C*)malloc((size_t)len+1);
+            if(!t){q[qi]=0;return q;}
+          }
+          memcpy(t,s,(size_t)len);t[len]=0;
+          if(st==1||st==2||st==3||st==8) q[qi++]=pn(t,len);
+          else { // st==4 name
+            D vi=FV(t);
+            D ai=FA(t);
+            if(vi) q[qi++]=av(vi); else if(ai) q[qi++]=aa(ai);
+            else q[qi++]=ar(parse_b(t,len,62));
+          }
+          if(t!=tmp_small) free(t);
         }
-        else if(st==6){ s++; len--; strncpy(t,s,len);t[len]='\0'; q[qi++]=as(parse_b(t,len,62));}
-        else if(st==5){ s++; len--; Q z=vna(0,6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z; if(*p)p++;}
+        else if(st==6){ q[qi++]=as(parse_b(s+1,len-1,62));}
+        else if(st==5){ s++; len--; Q z=vna(0,6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z; if(p<end)p++;}
         // TODO: S_FLT
         st=0;break;
       }
@@ -1417,6 +1553,7 @@ Q* lx(C*b){D l=strlen(b);Q*q=malloc(sizeof(Q)*(l+1));D qi=0;C*p=b;D st=0; // st:
   }
   q[qi]=0;return q;
 }
+Q* lx(C*b){return lx_len(b,(D)strlen(b));}
 
 C* sub(C* s){
   static C b[256];
@@ -1433,15 +1570,40 @@ C* sub(C* s){
     else if(p[0]=='/'&&p[1]=='\''){strcpy(d,"↿");d+=3;p+=2;}
     else if(p[0]=='\\'&&p[1]=='\''){strcpy(d,"⇃");d+=3;p+=2;}
     else if(p[0]=='<'&&p[1]=='p'){strcpy(d,"↫");d+=3;p+=2;}
-    else if(p[0]=='p'&&p[1]=='>'){strcpy(d,"↬");d+=3;p+=2;}
+    else if(p[0]=='q'&&p[1]=='>'){strcpy(d,"↬");d+=3;p+=2;}
     else {*d++=*p++;}
   }
   *d=0;
   return b;
 }
 
-C buffer[100];
-D main(void){
+static C* read_line(FILE* in){
+  if(!in) return 0;
+  size_t cap = 256;
+  size_t len = 0;
+  C* buf = (C*)malloc(cap);
+  if(!buf) return 0;
+  for(;;){
+    int ch = fgetc(in);
+    if(ch == EOF){
+      if(len == 0){ free(buf); return 0; }
+      break;
+    }
+    if(ch == '\n') break;
+    if(ch == '\r') continue;
+    if(len + 1 >= cap){
+      cap *= 2;
+      C* nb = (C*)realloc(buf, cap);
+      if(!nb){ free(buf); return 0; }
+      buf = nb;
+    }
+    buf[len++] = (C)ch;
+  }
+  buf[len] = 0;
+  return buf;
+}
+
+I main(I argc, C** argv){
 #if defined(_MSC_VER)
   SetConsoleOutputCP(65001);
   AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
@@ -1467,10 +1629,22 @@ D main(void){
   dkv(ft, ar(parse_b("fn",2,62)),   FT_fn);
   dkv(G, ar(parse_b("FT",2,62)),    ft);
   SC[0]=dni(0,3,0,0); SP=0;
+
+  if(argc > 1){
+    if(!ends_with_dot_l(argv[1])){
+      printf("usage: l script.l\n");
+    }else{
+      Q r = eval_code_file(argv[1]);
+      pr(r);printf("\n");
+    }
+  }
+
   while (1) {
-    printf(" "); if (!fgets(buffer, 100, stdin)){break;}
-    buffer[strcspn(buffer, "\r")] = '\0'; buffer[strcspn(buffer, "\n")] = '\0';
-    if (strcmp(buffer, "\\\\") == 0){break;}
+    printf(" ");
+    C* line = read_line(stdin);
+    if(!line) break;
+    if(strcmp(line, "\\\\") == 0){ free(line); break; }
+    if(!*line){ free(line); continue; }
     if(0==SP){
       for(D i=0;i<n(pi(SC[0],1));i++){
         Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
@@ -1478,11 +1652,12 @@ D main(void){
       }
       AI[0]=1;SC[0]=dni(0,3,0,0); SP=0; 
      } // reset THI only if evaluation takes us back to the global scope. 
-    C* s=sub(buffer);
-    printf("\033[A\033[2K %s\n",s);
-    Q* tokens = lx(s);
+    Q* tokens_base = lx_len(line, (D)strlen(line));
+    Q* tokens = tokens_base;
     Q r=E(&tokens,'\0');
+    free(tokens_base);
     pr(r);printf("\n");
+    free(line);
   }
   return 0;
 }

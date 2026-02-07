@@ -382,6 +382,13 @@ void pid(Q q,D i,Q d){if(n(q)<=i){printf("length error\n");return;};Bid(p(q),sz(
 void zid(Q q,D i,Q d){Q o=pi(q,i);ir(d);pid(q,i,d);dr(o);}
 void qid(Q q,D i,Q d){if(!t(q)){zid(q,i,d);}else{pid(q,i,d);}}
 
+static inline Q obj_ar(Q q){
+  if(!ip(q)) return 0;
+  B a = ha(q);
+  if(a==2) return MK_AR(2, (D)(q>>44));
+  return (Q)a;
+}
+
 // dict get/set
 static inline D lg2(D c){
 #if defined(_MSC_VER)
@@ -427,6 +434,71 @@ Q dk(Q d, Q k){                                                                 
   if(r){return r;}
   return ac(4);                                                                 // Return result from G or "not found"
 }
+
+static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth);
+
+static inline Q clone0_for_embed0(Q q, Q dest_ar, Q* stack, D depth){
+  if(!ip(q) || t(q)!=0) return q;
+  if(depth >= 64) return ac(99);
+  for(D i=0;i<depth;i++) if(stack[i]==q) return ac(2);                           // cycle detected
+  stack[depth]=q;
+  return clone0_for_embed(q, dest_ar, stack, depth+1);
+}
+
+static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
+  if(!ip(q) || t(q)!=0) return q;
+
+  B s = sh(q);
+  if(s==2){
+    Q htq=pi(q,0),kq=pi(q,1),vq=pi(q,2);
+
+    Q ht2 = tsna(dest_ar, 5, 1, ls(htq), n(htq), cp(htq));
+    memcpy(p(ht2), p(htq), (size_t)pz(ls(htq), (D)cp(htq)));
+
+    Q k2 = tsna(dest_ar, 0, 1, ls(kq), n(kq), cp(kq));
+    for(D i=0;i<n(kq);i++){
+      Q ki = pi(kq, i);
+      Q kc = clone0_for_embed0(ki, dest_ar, stack, depth);
+      if(34==t(kc)) return kc;
+      zid(k2, i, kc);
+    }
+
+    Q v2 = tsna(dest_ar, t(vq), 1, ls(vq), n(vq), cp(vq));
+    if(0==t(vq)){
+      for(D i=0;i<n(vq);i++){
+        Q vi = pi(vq, i);
+        Q vc = clone0_for_embed0(vi, dest_ar, stack, depth);
+        if(34==t(vc)) return vc;
+        zid(v2, i, vc);
+      }
+    }else{
+      memcpy(p(v2), p(vq), (size_t)sz(vq) * (size_t)n(vq));
+    }
+
+    Q d2 = tsna(dest_ar, 0, 2, 3, 3, 3);
+    zid(d2, 0, ht2);
+    zid(d2, 1, k2);
+    zid(d2, 2, v2);
+    return d2;
+  }
+
+  if(s==1 || s==0){
+    Q* h = ptr(q);
+    B z = (B)h[2];
+    D nq = (D)h[4], cq = (D)h[5];
+    Q r = tsna(dest_ar, 0, s, z, nq, cq);
+    for(D i=0;i<nq;i++){
+      Q ei = pi(q, i);
+      Q ec = clone0_for_embed0(ei, dest_ar, stack, depth);
+      if(34==t(ec)) return ec;
+      zid(r, i, ec);
+    }
+    return r;
+  }
+
+  return ac(1);                                                                   // unsupported shape
+}
+
 Q dkv(Q d,Q k,Q v){
   Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
   D* ht=(D*)p(htq);
@@ -1073,7 +1145,19 @@ Q bn(B A,Q v,Q a,Q w){ return math_m(w,bn_aa); }
 Q ng(B A,Q v,Q a,Q w){ return math_m(w,ng_aa); }
 
 Q set(Q a,Q w,D sp){
-  dkv(SC[sp],a,w);
+  Q d = SC[sp];
+  if(ip(w) && 0==t(w)){
+    // Preserve identity for open-scope/list builders so later input continues mutating the same object.
+    if(2==sh(w) && SP==sp+1 && SC[SP]==w){ dkv(d, a, w); return w; }
+    if(1==sh(w) && LP>0 && NL[LP]==w){ dkv(d, a, w); return w; }
+
+    Q stack[64];
+    Q wc = clone0_for_embed0(w, obj_ar(d), stack, 0);
+    if(34==t(wc)) return wc;
+    dkv(d, a, wc);
+    return wc;
+  }
+  dkv(d, a, w);
   return w;
 }
 
@@ -1374,10 +1458,18 @@ Q E(Q** q, C tc){
     if(tc && 34==t(a) && tc==dc(a)) break;
     if(34==t(a) && ';'==dc(a)){(*q)++; continue;}                                 // ignore empty statements
     r=e(q);                                                                        // e() consumes exactly one expression
-    if(tc==')'){                                                                   // list literal capture
+    if(tc==')' && !(4==t(r) && 0==n(r))){                                          // list literal capture (skip "missing")
+      Q v = r;
+      if(ip(r) && 0==t(r)){
+        Q stack[64];
+        Q vc = clone0_for_embed0(r, obj_ar(NL[clp]), stack, 0);
+        if(34==t(vc)) return vc;
+        v = vc;
+      }
+
       Q l=NL[clp];D idx=n(l);
       Q l2=xn(l,1); if(34==t(l2)) return l2; if(l2!=l) NL[clp]=l2;
-      zid(NL[clp],idx,r);
+      zid(NL[clp],idx,v);
     }
     if(**q && 34==t(**q) && ';'==dc(**q)) (*q)++;                                  // consume statement terminator if present
   }
@@ -1672,7 +1764,19 @@ I main(I argc, C** argv){
      } // reset THI only if evaluation takes us back to the global scope. 
     Q* tokens_base = lx_len(line, (D)strlen(line));
     Q* tokens = tokens_base;
-    Q r=E(&tokens,'\0');
+    Q r;
+    if(LP>0){
+      r=E(&tokens,')');                                                         // evaluate as list-body, appending into the open builder
+      if(*tokens && 34==t(*tokens) && ')'==dc(*tokens)){
+        r=ecl(&tokens);                                                         // close the open list and return it
+        if(*tokens){
+          Q r2=E(&tokens,'\0');                                                  // evaluate any trailing code outside list context
+          if(!(4==t(r2) && 0==n(r2))) r=r2;
+        }
+      }
+    }else{
+      r=E(&tokens,'\0');
+    }
     free(tokens_base);
     pr(r);printf("\n");
     free(line);

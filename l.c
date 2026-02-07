@@ -1301,25 +1301,49 @@ Q Ap(Q a){Q p=tsna(0,4,1,3,1,1);pid(p,0,a);return p;}
 Q e(Q** q);
 Q E(Q** q,C tc);
 Q eoc(Q** q){
-  (*q)++;
-  if(SP+1 >= 1024) return ac(99);                                            // scope depth overflow
-  SP++;D csp=SP;                                                            // cache the SP of this new allocation, return that.
-  SC[SP] = dn(0,3,0,0);                                                       // Allocate new dictionary for the new scope
-  E(q,'}');                                                               // Evaluate the inner expression
-  return SC[csp];                                                           // Return the created dictionary
+  (*q)++;                                                                      // consume '{'
+  if(SP+1 >= 1024) return ac(99);                                              // scope depth overflow
+  SP++;D csp=SP;                                                               // cache the SP of this new allocation, return that.
+  SC[SP] = dn(0,3,0,0);                                                        // Allocate new dictionary for the new scope
+  (void)E(q,'}');                                                              // Evaluate until '}' or end-of-stream
+  if(**q && 34==t(**q) && '}'==dc(**q)){                                       // If '}' is present, consume it and close the scope.
+    (*q)++;
+    Q d = SC[csp];
+    if(SP>0) SP--;
+    return d;
+  }
+  return SC[csp];                                                              // Leave the scope open across end-of-stream.
 }
 
-Q ecc(Q** q){printf("ecc\n");Q d=SC[SP];if(SP > 0) SP--;return d;}                           // Behave like a semicolon, terminating the expression
+Q ecc(Q** q){
+  (*q)++;                                                                      // consume '}'
+  if(SP==0) return ac(2);
+  Q d=SC[SP];
+  SP--;
+  return d;
+}
 
 Q eol(Q** q){
-  (*q)++;
+  (*q)++;                                                                      // consume '('
   if(LP+1 >= 1024) return ac(99);
   LP++;D clp=LP;
   NL[LP] = vca(0, 0, 3, 64);
-  E(q,')');
-  return NL[clp];
+  (void)E(q,')');                                                              // Evaluate until ')' or end-of-stream, appending values.
+  if(**q && 34==t(**q) && ')'==dc(**q)){                                       // If ')' is present, consume it and close the list.
+    (*q)++;
+    Q l = NL[clp];
+    if(LP>0) LP--;
+    return l;
+  }
+  return NL[clp];                                                              // Leave the list open across end-of-stream.
 }
-Q ecl(Q** q){Q l=NL[LP];if(LP > 0) LP--;return l;}
+Q ecl(Q** q){
+  (*q)++;                                                                      // consume ')'
+  if(LP==0) return ac(2);
+  Q l=NL[LP];
+  LP--;
+  return l;
+}
 
 Q emv(Q** q){
   Q v=*(*q)++;
@@ -1342,53 +1366,47 @@ Q edv(Q a,Q** q){
 }
 
 Q E(Q** q, C tc){
-  Q r = 0;D clp=LP;
-  while(**q && !(34==t(**q)&&tc==dc(**q))){
-    while(**q && 34==t(**q) && dc(**q)==';') (*q)++; // ignore empty statements
-    if(!**q || (34==t(**q)&&tc==dc(**q))) break;
-    r=e(q);
-    if(tc==')'){
+  Q r = tsna(0,4,1,3,0,0);                                                        // "missing" by default
+  D clp=LP;                                                                       // capture the list builder index for this call
+  for(;;){
+    Q a = **q;
+    if(!a) break;
+    if(tc && 34==t(a) && tc==dc(a)) break;
+    if(34==t(a) && ';'==dc(a)){(*q)++; continue;}                                 // ignore empty statements
+    r=e(q);                                                                        // e() consumes exactly one expression
+    if(tc==')'){                                                                   // list literal capture
       Q l=NL[clp];D idx=n(l);
       Q l2=xn(l,1); if(34==t(l2)) return l2; if(l2!=l) NL[clp]=l2;
       zid(NL[clp],idx,r);
     }
-    while(**q && !(34==t(**q) && dc(**q)==';')) { // Find the end of the evaluated expression
-      if(34==t(**q) && tc==dc(**q)){printf("early return found %c %d\n",tc,clp);(*q)++;return r;}    // if we find the ending character then break from the loop without advancing past that character
-      (*q)++; 
-    }                           
-    if(**q && 34==t(**q) && ';'==dc(**q)){(*q)++;}  // advance past ; if it was encountered                                                             // If we found a semicolon, skip it to start the next expression
+    if(**q && 34==t(**q) && ';'==dc(**q)) (*q)++;                                  // consume statement terminator if present
   }
   return r;
 }
 
 Q e(Q** q){
   Q a=**q;
-  if(!a){return tsna(0,4,1,3,0,0);}                                  // If a is the end of the stream then we must have missing data. return type 4
+  if(!a) return tsna(0,4,1,3,0,0);                                              // missing
   if(34==t(a)){
-    if('{'==dc(a)){a=eoc(q);}
-    if('}'==dc(a)){a=ecc(q);}
-    if('('==dc(a)){a=eol(q);}
-    if(')'==dc(a)){a=ecl(q);}
-    if(';'==dc(a)) return tsna(0,4,1,3,0,0);                          // Semicolon is a statement terminator, acts as end-of-stream for this expression.
+    C c = (C)dc(a);
+    if(';'==c){(*q)++; return tsna(0,4,1,3,0,0);}                                // terminator => missing
+    if('{'==c) return eoc(q);
+    if('}'==c) return ecc(q);
+    if('('==c) return eol(q);
+    if(')'==c) return ecl(q);
   }
-  Q w=(*q)[1];                                                     // we know a is non zero, so we can read q[1] but it may be end of stream, or a semicolon
-  B endexpr = !w || (34==t(w) && dc(w)==';');                    // end of expression is null or semicolon or }
-  B endscope = w && (34==t(w) && dc(w)=='}');                    // end of scope is }
-  B endlist = w && (34==t(w) && dc(w)==')');                    // end of list is )
-  B end = endexpr || endscope || endlist;
-  if(endscope){ecc(q);}
-  if(endlist){ecl(q);}
-  return (2==t(a)&&!end)  ?                                // if a is a verb and w isn't the end of the stream
-         emv(q)        :                                       //  then evaluate a monadic verb // TODO: arena awareness
-         (2==t(a)&&end) ?                                   // if a is a verb and we have hit the end of the stream
-         Ap(a)         :                                       //  then create a dyadic partial evaluation
-         (!end&&2==t(w))  ?                                   // if w is non-zero and is a verb
-         edv(a,(((*q)++),q))    :                                       //  then eval dyadic verb
-         (4==t(a)&&end) ?                                   // if a is a partial evaluation and we don't have a w 
-         a             :                                       //  then just return the partial up the stack. 
-         (1==t(a))     ?                                       // if a is a reference (and not being assigned to)
-         dk(SC[SP],a)  :                                       //  then return the value of the reference
-         a             ;                                       //  otherwise this must be data, return the data.
+
+  Q w=(*q)[1];                                                                   // safe: token streams are 0-terminated
+  B end = !w || (34==t(w) && (';'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+
+  if(2==t(a) && !end) return emv(q);                                             // monadic verb chain
+  if(2==t(a) && end){(*q)++; return Ap(a);}                                      // partial at end-of-expression
+
+  if(!end && w && 2==t(w)){(*q)++; return edv(a, q);}                            // dyadic a v w...
+
+  (*q)++;                                                                        // consume noun/reference
+  if(1==t(a)) return dk(SC[SP],a);
+  return a;
 }
 
 Q R(C a){return ('a'<=a&&a<='z')?ar(a-'a'):0;}
@@ -1645,7 +1663,7 @@ I main(I argc, C** argv){
     if(!line) break;
     if(strcmp(line, "\\\\") == 0){ free(line); break; }
     if(!*line){ free(line); continue; }
-    if(0==SP){
+    if(0==SP && 0==LP){
       for(D i=0;i<n(pi(SC[0],1));i++){
         Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
         dkv(G,t2g(gk),t2g(gv));

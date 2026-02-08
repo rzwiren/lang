@@ -10,9 +10,9 @@
 #include <string.h>
 #include <errno.h>
 #include <math.h>
+#include <time.h>
 #if defined(_MSC_VER)
   #include <intrin.h>
-  #include <malloc.h>
   #include <windows.h>
 #else
   #include <sys/mman.h>
@@ -20,6 +20,20 @@
   #include <unistd.h>
   #include <sys/stat.h>
 #endif
+
+// ---------------------------------------------------------------------------
+// l.c memory rule: C standard library heap allocation APIs are illegal here.
+// Do not call malloc/free/realloc/calloc. Use arena allocators (tsna/vna/etc.)
+// for Lang objects, and os_heap_alloc/os_heap_free for temporary C buffers.
+// ---------------------------------------------------------------------------
+struct LANG_MALLOC_IS_ILLEGAL;
+struct LANG_CALLOC_IS_ILLEGAL;
+struct LANG_REALLOC_IS_ILLEGAL;
+struct LANG_FREE_IS_ILLEGAL;
+#define malloc(...)  ((void*)sizeof(struct LANG_MALLOC_IS_ILLEGAL))
+#define calloc(...)  ((void*)sizeof(struct LANG_CALLOC_IS_ILLEGAL))
+#define realloc(...) ((void*)sizeof(struct LANG_REALLOC_IS_ILLEGAL))
+#define free(...)    do{ (void)sizeof(struct LANG_FREE_IS_ILLEGAL); }while(0)
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
 typedef long long J; typedef int I; typedef short H;
@@ -29,6 +43,16 @@ typedef Q(*VF)(B,Q,Q,Q);                                                        
 #define T_CHAR  6
 #define T_SYM   7
 #define T_FLT   8
+
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+  #include <xmmintrin.h>
+  #define HAVE_MXCSR 1
+#elif (defined(__i386__) || defined(__x86_64__)) && defined(__SSE__)
+  #include <xmmintrin.h>
+  #define HAVE_MXCSR 1
+#else
+  #define HAVE_MXCSR 0
+#endif
 
 static inline Q f64_bits(double x){ Q b=0; memcpy(&b, &x, sizeof(b)); return b; }
 static inline double f64_from_bits(Q b){ double x=0; memcpy(&x, &b, sizeof(x)); return x; }
@@ -119,6 +143,7 @@ void ir(Q q);void dr(Q q);
 static inline B ends_with_dot_l(const char* s);
 static inline B qstr_to_c(Q w, C* out, D out_cap);
 static Q eval_code_file(const char* fn);
+static Q eval_code_tape(const C* src, D len);
 
 Q qbz(Q bz){return ((bz+15)/16)*2;}                                             // forward declare refcount helpers
 Q hz(){return sizeof(Q)*6;}                                                     // header size
@@ -177,6 +202,7 @@ static inline void commit_range(void* p, Q bytes){
 #endif
 }
 Q bumpalloc(B t,B s,B z,D n,D c,Q ar){                                                    
+  (void)ar;
   Q units=bump_units(z,c);
   if(AI[0]+units>AC[0]){printf("oom\n");exit(0);}
   if(AI[0]+units>AM[0]){
@@ -189,6 +215,25 @@ Q bumpalloc(B t,B s,B z,D n,D c,Q ar){
   AI[0]+=units;
   ah(o,t,s,z,0,n,c);
   memset(o+6,0,pz(z,c));
+  return (off<<6)|(0<<4);
+}
+
+Q bumpalloc_u(B t,B s,B z,D n,D c,Q ar){
+  // Uninitialized payload allocation (header set, payload not zeroed).
+  // Only use when the caller will fully initialize all n elements before any read.
+  (void)ar;
+  Q units=bump_units(z,c);
+  if(AI[0]+units>AC[0]){printf("oom\n");exit(0);}
+  if(AI[0]+units>AM[0]){
+    Q req=AI[0]+units;
+    commit_range(AB[0]+AM[0]*BUMP_UNIT_QS, (req-AM[0])*BUMP_UNIT_BYTES);
+    AM[0]=req;
+  }
+  Q off=AI[0];
+  Q* o=AB[0]+off*BUMP_UNIT_QS;
+  AI[0]+=units;
+  ah(o,t,s,z,0,n,c);
+  // no memset
   return (off<<6)|(0<<4);
 }
 void bumpfree(B a){AI[a]=0;}
@@ -212,6 +257,7 @@ void buddyinit(B a){
   }
 }
 Q buddyalloc(B t,B s,B z,D n,D c,Q ar){
+  (void)ar;
   Q units = buddy_units(z,c);
   B ord   = buddy_order_from_units(units);
 
@@ -236,6 +282,37 @@ Q buddyalloc(B t,B s,B z,D n,D c,Q ar){
   commit_range(o, az(z,c));
   ah(o,t,s,z,0,n,c);
   memset(o+6, 0, pz(z,c));
+
+  return (off << 11) | (ord << 6) | (1 << 4) ;
+}
+
+Q buddyalloc_u(B t,B s,B z,D n,D c,Q ar){
+  // Uninitialized payload allocation (header set, payload not zeroed).
+  // Only use when the caller will fully initialize all n elements before any read.
+  Q units = buddy_units(z,c);
+  B ord   = buddy_order_from_units(units);
+
+  B i = ord;
+  while(i<32 && BF[i]==~0ULL) i++;
+  if(i==32){ printf("oom buddy\n"); exit(0); }
+
+  Q off = BF[i];
+  BF[i] = *(Q*)(AB[1] + off * BUDDY_UNIT_QS);
+
+  while(i>ord){
+    i--;
+    Q u = buddy_units_from_order(i);
+    Q b = off + u;
+
+    commit_range(AB[1] + b * BUDDY_UNIT_QS, sizeof(Q));
+    *(Q*)(AB[1] + b * BUDDY_UNIT_QS) = BF[i];
+    BF[i] = b;
+  }
+
+  Q* o = AB[1] + off * BUDDY_UNIT_QS;
+  commit_range(o, az(z,c));
+  ah(o,t,s,z,0,n,c);
+  // no memset
 
   return (off << 11) | (ord << 6) | (1 << 4) ;
 }
@@ -306,6 +383,15 @@ Q tsna(Q ar, B t, B s, B z, D n, D c){
   if(a==1) return buddyalloc(t,s,z,n,c,ar);
   return bumpalloc(t,s,z,n,c,ar); // TODO: return fatal error for unknown arena instead of temp arena fallback
 }
+
+// Uninitialized allocation variant: does not zero payload for arena 0 (temp bump) or arena 1 (buddy).
+// For file-backed arena (2), always use the initialized allocator to avoid persisting garbage bytes.
+Q tsna_u(Q ar, B t, B s, B z, D n, D c){
+  B a = AR_ID(ar);
+  if(a==2) return filebumpalloc(t,s,z,n,c,ar);
+  if(a==1) return buddyalloc_u(t,s,z,n,c,ar);
+  return bumpalloc_u(t,s,z,n,c,ar);
+}
 Q vna(Q ar, B t, B z, D n){ return tsna(ar, t, 1, z, n, cn(t,1,n)); }
 Q lna(Q ar, D n){ return vna(ar, 0, 3, n); }
 Q vca(Q ar, B t, B z, D c){ return tsna(ar, t, 1, z, 0, c); }
@@ -349,7 +435,15 @@ Q dni(B t,B z,D n,Q ar){                                                        
 Q dn(B t,B z,D n,Q ar){return dni(t,z,n,ar);}
 Q dnu(B t,B z,D n,B a){return tsna(a,0,2,3,3,3);}
 // varwidth getters
-Q Bi(B* b,B z,D i){Q r=0;memcpy(&r,b+z*i,z);return r;}                               // mask this by the size of z then cast to Q. NO SIGN EXTENSION FLOATS MAY LIVE IN HERE TOO.
+Q Bi(B* b,B z,D i){                                                                // no sign-extension; floats may live in here too
+  switch(z){
+    case 1: return (Q)((B*)b)[i];
+    case 2: return (Q)((W*)b)[i];
+    case 4: return (Q)((D*)b)[i];
+    case 8: return ((Q*)b)[i];
+    default: { Q r=0; memcpy(&r, b+z*i, z); return r; }
+  }
+}
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}              
 Q ri(Q q,D i){
   if(1==sh(q)){return pi(q,i);}
@@ -422,7 +516,15 @@ Q xn(Q q, D add){
   return grow(q, need_n);
 }
 // varwidth setters
-void Bid(B* b,B z,D i,Q d){memcpy(b+z*i,&d,z);}
+void Bid(B* b,B z,D i,Q d){
+  switch(z){
+    case 1: ((B*)b)[i] = (B)d; return;
+    case 2: ((W*)b)[i] = (W)d; return;
+    case 4: ((D*)b)[i] = (D)d; return;
+    case 8: ((Q*)b)[i] = (Q)d; return;
+    default: memcpy(b+z*i, &d, z); return;
+  }
+}
 void pid(Q q,D i,Q d){if(n(q)<=i){printf("length error\n");return;};Bid(p(q),sz(q),i,d);}          // throw length error when i outside of n
 void zid(Q q,D i,Q d){Q o=pi(q,i);ir(d);pid(q,i,d);dr(o);}
 void qid(Q q,D i,Q d){if(!t(q)){zid(q,i,d);}else{pid(q,i,d);}}
@@ -936,6 +1038,67 @@ void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
   return addr;
 }
 
+// -----------------------------------------------------------------------------
+// OS heap allocation (no libc malloc/free/realloc/calloc)
+//
+// This is for temporary C-side buffers (lexer token buffers, input lines, etc.).
+// Lang objects must still be allocated via arenas (tsna/vna/etc.).
+//
+// NOTE: We intentionally avoid the C standard library allocators in l.c.
+// -----------------------------------------------------------------------------
+
+typedef struct { Q magic; Q payload_bytes; Q total_bytes; } OsHeapHdr;
+static const Q OSHEAP_MAGIC = 0x4C414E472D4F5341ULL; // "LANG-OSA" (arbitrary tag)
+
+static inline Q os_align16(Q x){ return (x + 15ULL) & ~15ULL; }
+
+static void* os_heap_alloc(Q payload_bytes){
+  Q total = os_align16((Q)sizeof(OsHeapHdr) + payload_bytes);
+#if defined(_MSC_VER)
+  void* base = VirtualAlloc(0, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  if(!base) return 0;
+#else
+  void* base = mmap(0, (size_t)total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if(base == MAP_FAILED) return 0;
+#endif
+  OsHeapHdr* h = (OsHeapHdr*)base;
+  h->magic = OSHEAP_MAGIC;
+  h->payload_bytes = payload_bytes;
+  h->total_bytes = total;
+  return (void*)(h + 1);
+}
+
+static inline Q os_heap_payload_bytes(void* p){
+  if(!p) return 0;
+  OsHeapHdr* h = ((OsHeapHdr*)p) - 1;
+  if(h->magic != OSHEAP_MAGIC) return 0;
+  return h->payload_bytes;
+}
+
+static void os_heap_free(void* p){
+  if(!p) return;
+  OsHeapHdr* h = ((OsHeapHdr*)p) - 1;
+  if(h->magic != OSHEAP_MAGIC) return;
+  Q total = h->total_bytes;
+#if defined(_MSC_VER)
+  VirtualFree((void*)h, 0, MEM_RELEASE);
+#else
+  munmap((void*)h, (size_t)total);
+#endif
+}
+
+static void* os_heap_realloc(void* p, Q new_payload_bytes){
+  if(!p) return os_heap_alloc(new_payload_bytes);
+  if(new_payload_bytes == 0){ os_heap_free(p); return 0; }
+  Q old_payload_bytes = os_heap_payload_bytes(p);
+  void* np = os_heap_alloc(new_payload_bytes);
+  if(!np) return 0;
+  Q copy_bytes = old_payload_bytes < new_payload_bytes ? old_payload_bytes : new_payload_bytes;
+  if(copy_bytes) memcpy(np, p, (size_t)copy_bytes);
+  os_heap_free(p);
+  return np;
+}
+
 Q ca(B A,Q v,Q a,Q w);
 
 Q file_append(Q a, Q w);
@@ -1107,7 +1270,7 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 28
+#define VTZ 33
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -1302,6 +1465,41 @@ static inline double num_f64_elem(Q q, D i){
   return num_f64_atom(q);
 }
 
+static inline Q vne(Q ar, B t, B z, D n){
+  // Allocate an exact-capacity value vector (no growth slack). Great for numeric kernels.
+  D c = n ? n : 1;
+  return tsna(ar, t, 1, z, n, c);
+}
+
+static inline Q vne_u(Q ar, B t, B z, D n){
+  // Allocate an exact-capacity value vector without zeroing payload.
+  // Only use when the caller will fully initialize all n elements.
+  D c = n ? n : 1;
+  return tsna_u(ar, t, 1, z, n, c);
+}
+
+static inline Q now_ns_u64(void){
+#if defined(_MSC_VER)
+  static Q qpc_freq = 0;
+  if(!qpc_freq){
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    qpc_freq = (Q)f.QuadPart;
+    if(!qpc_freq) qpc_freq = 1;
+  }
+  LARGE_INTEGER c;
+  QueryPerformanceCounter(&c);
+  Q ticks = (Q)c.QuadPart;
+  Q sec = ticks / qpc_freq;
+  Q rem = ticks % qpc_freq;
+  return sec*1000000000ULL + (rem*1000000000ULL)/qpc_freq;
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (Q)ts.tv_sec*1000000000ULL + (Q)ts.tv_nsec;
+#endif
+}
+
 static inline J floordiv_j(J a, J b){
   // Requires b != 0. Floors toward -inf (Python-style).
   J q = a / b;
@@ -1363,102 +1561,152 @@ typedef Q(*NumKernel)(Q a, Q w, B sa, B sw, D nz);
 
 static Q k_add_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) + num_f64_atom(w));
-  Q z=vna(0, T_FLT, 3, nz);
+  Q z=vne_u(0, T_FLT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x = num_f64_elem(a, sa?i:0);
-    double y = num_f64_elem(w, sw?i:0);
-    pid(z, i, f64_bits(x + y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = f64_bits(x + y);
   }
   return z;
 }
 static Q k_mul_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) * num_f64_atom(w));
-  Q z=vna(0, T_FLT, 3, nz);
+  Q z=vne_u(0, T_FLT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x = num_f64_elem(a, sa?i:0);
-    double y = num_f64_elem(w, sw?i:0);
-    pid(z, i, f64_bits(x * y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = f64_bits(x * y);
   }
   return z;
 }
 static Q k_sub_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) - num_f64_atom(w));
-  Q z=vna(0, T_FLT, 3, nz);
+  Q z=vne_u(0, T_FLT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x = num_f64_elem(a, sa?i:0);
-    double y = num_f64_elem(w, sw?i:0);
-    pid(z, i, f64_bits(x - y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = f64_bits(x - y);
   }
   return z;
 }
 static Q k_min_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0){ double x=num_f64_atom(a), y=num_f64_atom(w); return af(0, x<y?x:y); }
-  Q z=vna(0, T_FLT, 3, nz);
+  Q z=vne_u(0, T_FLT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x = num_f64_elem(a, sa?i:0);
-    double y = num_f64_elem(w, sw?i:0);
-    pid(z, i, f64_bits(x<y?x:y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = f64_bits(x<y?x:y);
   }
   return z;
 }
 static Q k_max_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0){ double x=num_f64_atom(a), y=num_f64_atom(w); return af(0, x>y?x:y); }
-  Q z=vna(0, T_FLT, 3, nz);
+  Q z=vne_u(0, T_FLT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x = num_f64_elem(a, sa?i:0);
-    double y = num_f64_elem(w, sw?i:0);
-    pid(z, i, f64_bits(x>y?x:y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = f64_bits(x>y?x:y);
   }
   return z;
 }
 static Q k_div_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) / num_f64_atom(w));
-  Q z=vna(0, T_FLT, 3, nz);
+  Q z=vne_u(0, T_FLT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x = num_f64_elem(a, sa?i:0);
-    double y = num_f64_elem(w, sw?i:0);
-    pid(z, i, f64_bits(x / y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = f64_bits(x / y);
   }
   return z;
 }
 static Q k_mod_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, fmod(num_f64_atom(a), num_f64_atom(w)));
-  Q z=vna(0, T_FLT, 3, nz);
+  Q z=vne_u(0, T_FLT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x = num_f64_elem(a, sa?i:0);
-    double y = num_f64_elem(w, sw?i:0);
-    pid(z, i, f64_bits(fmod(x, y)));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = f64_bits(fmod(x, y));
   }
   return z;
 }
 
 static Q k_add_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) + num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    Q x = num_int_bits_elem(a, sa?i:0);
-    Q y = num_int_bits_elem(w, sw?i:0);
-    pid(z, i, x + y);
+    Q x = sa ? ap[i] : ax0;
+    Q y = sw ? wp[i] : wx0;
+    out[i] = x + y;
   }
   return z;
 }
 static Q k_mul_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) * num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    Q x = num_int_bits_elem(a, sa?i:0);
-    Q y = num_int_bits_elem(w, sw?i:0);
-    pid(z, i, x * y);
+    Q x = sa ? ap[i] : ax0;
+    Q y = sw ? wp[i] : wx0;
+    out[i] = x * y;
   }
   return z;
 }
 static Q k_sub_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) - num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    Q x = num_int_bits_elem(a, sa?i:0);
-    Q y = num_int_bits_elem(w, sw?i:0);
-    pid(z, i, x - y);
+    Q x = sa ? ap[i] : ax0;
+    Q y = sw ? wp[i] : wx0;
+    out[i] = x - y;
   }
   return z;
 }
@@ -1467,11 +1715,16 @@ static Q k_min_i(Q a,Q w,B sa,B sw,D nz){
     Q x=num_int_bits_atom(a), y=num_int_bits_atom(w);
     return an((J)(((J)x < (J)y) ? x : y));
   }
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    Q x = num_int_bits_elem(a, sa?i:0);
-    Q y = num_int_bits_elem(w, sw?i:0);
-    pid(z, i, ((J)x < (J)y) ? x : y);
+    Q x = sa ? ap[i] : ax0;
+    Q y = sw ? wp[i] : wx0;
+    out[i] = ((J)x < (J)y) ? x : y;
   }
   return z;
 }
@@ -1480,41 +1733,61 @@ static Q k_max_i(Q a,Q w,B sa,B sw,D nz){
     Q x=num_int_bits_atom(a), y=num_int_bits_atom(w);
     return an((J)(((J)x > (J)y) ? x : y));
   }
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    Q x = num_int_bits_elem(a, sa?i:0);
-    Q y = num_int_bits_elem(w, sw?i:0);
-    pid(z, i, ((J)x > (J)y) ? x : y);
+    Q x = sa ? ap[i] : ax0;
+    Q y = sw ? wp[i] : wx0;
+    out[i] = ((J)x > (J)y) ? x : y;
   }
   return z;
 }
 static Q k_band_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) & num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    Q x = num_int_bits_elem(a, sa?i:0);
-    Q y = num_int_bits_elem(w, sw?i:0);
-    pid(z, i, x & y);
+    Q x = sa ? ap[i] : ax0;
+    Q y = sw ? wp[i] : wx0;
+    out[i] = x & y;
   }
   return z;
 }
 static Q k_bor_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) | num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    Q x = num_int_bits_elem(a, sa?i:0);
-    Q y = num_int_bits_elem(w, sw?i:0);
-    pid(z, i, x | y);
+    Q x = sa ? ap[i] : ax0;
+    Q y = sw ? wp[i] : wx0;
+    out[i] = x | y;
   }
   return z;
 }
 static Q k_bxor_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) ^ num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    Q x = num_int_bits_elem(a, sa?i:0);
-    Q y = num_int_bits_elem(w, sw?i:0);
-    pid(z, i, x ^ y);
+    Q x = sa ? ap[i] : ax0;
+    Q y = sw ? wp[i] : wx0;
+    out[i] = x ^ y;
   }
   return z;
 }
@@ -1523,11 +1796,17 @@ static Q k_mod_i(Q a,Q w,B sa,B sw,D nz){
     J y=(J)num_int_bits_atom(w); if(!y) return ac(2);
     return an(floormod_j((J)num_int_bits_atom(a), y));
   }
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    J y=(J)num_int_bits_elem(w, sw?i:0); if(!y) return ac(2);
-    J x=(J)num_int_bits_elem(a, sa?i:0);
-    pid(z, i, (Q)floormod_j(x, y));
+    J y = (J)(sw ? wp[i] : wx0);
+    if(!y) return ac(2);
+    J x = (J)(sa ? ap[i] : ax0);
+    out[i] = (Q)floormod_j(x, y);
   }
   return z;
 }
@@ -1536,66 +1815,108 @@ static Q k_floordiv_i(Q a,Q w,B sa,B sw,D nz){
     J y=(J)num_int_bits_atom(w); if(!y) return ac(2);
     return an(floordiv_j((J)num_int_bits_atom(a), y));
   }
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    J y=(J)num_int_bits_elem(w, sw?i:0); if(!y) return ac(2);
-    J x=(J)num_int_bits_elem(a, sa?i:0);
-    pid(z, i, (Q)floordiv_j(x, y));
+    J y = (J)(sw ? wp[i] : wx0);
+    if(!y) return ac(2);
+    J x = (J)(sa ? ap[i] : ax0);
+    out[i] = (Q)floordiv_j(x, y);
   }
   return z;
 }
 
 static Q k_eq_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) == num_f64_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x=num_f64_elem(a, sa?i:0), y=num_f64_elem(w, sw?i:0);
-    pid(z, i, (Q)(x==y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = (Q)(x==y);
   }
   return z;
 }
 static Q k_lt_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) < num_f64_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x=num_f64_elem(a, sa?i:0), y=num_f64_elem(w, sw?i:0);
-    pid(z, i, (Q)(x<y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = (Q)(x<y);
   }
   return z;
 }
 static Q k_gt_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) > num_f64_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  double ax0 = sa ? 0.0 : num_f64_atom(a);
+  double wx0 = sw ? 0.0 : num_f64_atom(w);
   for(D i=0;i<nz;i++){
-    double x=num_f64_elem(a, sa?i:0), y=num_f64_elem(w, sw?i:0);
-    pid(z, i, (Q)(x>y));
+    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
+    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    out[i] = (Q)(x>y);
   }
   return z;
 }
 static Q k_eq_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) == (J)num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    J x=(J)num_int_bits_elem(a, sa?i:0), y=(J)num_int_bits_elem(w, sw?i:0);
-    pid(z, i, (Q)(x==y));
+    J x = (J)(sa ? ap[i] : ax0);
+    J y = (J)(sw ? wp[i] : wx0);
+    out[i] = (Q)(x==y);
   }
   return z;
 }
 static Q k_lt_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) < (J)num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    J x=(J)num_int_bits_elem(a, sa?i:0), y=(J)num_int_bits_elem(w, sw?i:0);
-    pid(z, i, (Q)(x<y));
+    J x = (J)(sa ? ap[i] : ax0);
+    J y = (J)(sw ? wp[i] : wx0);
+    out[i] = (Q)(x<y);
   }
   return z;
 }
 static Q k_gt_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) > (J)num_int_bits_atom(w)));
-  Q z=vna(0, T_INT, 3, nz);
+  Q z=vne_u(0, T_INT, 3, nz);
+  Q* out = (Q*)p(z);
+  Q* ap = sa ? (Q*)p(a) : 0;
+  Q* wp = sw ? (Q*)p(w) : 0;
+  Q ax0 = sa ? 0 : num_int_bits_atom(a);
+  Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
-    J x=(J)num_int_bits_elem(a, sa?i:0), y=(J)num_int_bits_elem(w, sw?i:0);
-    pid(z, i, (Q)(x>y));
+    J x = (J)(sa ? ap[i] : ax0);
+    J y = (J)(sw ? wp[i] : wx0);
+    out[i] = (Q)(x>y);
   }
   return z;
 }
@@ -1709,8 +2030,9 @@ static Q int_bit_not(Q w){
   if(sw==0) return an((J)(~num_int_bits_atom(w)));
   if(sw!=1) return ac(1);
   D nw=n(w);
-  Q z=vna(0, T_INT, 3, nw);
-  for(D i=0;i<nw;i++) pid(z, i, ~num_int_bits_elem(w, i));
+  Q z=vne_u(0, T_INT, 3, nw);
+  Q* out = (Q*)p(z);
+  for(D i=0;i<nw;i++) out[i] = ~num_int_bits_elem(w, i);
   return z;
 }
 
@@ -1724,11 +2046,12 @@ Q nt(B A,Q v,Q a,Q w){
   }
   if(sw!=1) return ac(1);
   D nw=n(w);
-  Q z=vna(0, T_INT, 3, nw);
+  Q z=vne_u(0, T_INT, 3, nw);
+  Q* out = (Q*)p(z);
   if(t(w)==T_FLT){
-    for(D i=0;i<nw;i++) pid(z,i, num_f64_elem(w,i)==0.0 );
+    for(D i=0;i<nw;i++) out[i] = (Q)(num_f64_elem(w,i)==0.0);
   }else{
-    for(D i=0;i<nw;i++) pid(z,i, num_int_bits_elem(w,i)==0 );
+    for(D i=0;i<nw;i++) out[i] = (Q)(num_int_bits_elem(w,i)==0);
   }
   return z;
 }
@@ -1736,7 +2059,10 @@ Q nt(B A,Q v,Q a,Q w){
 Q tl(B A,Q v,Q a,Q w){
   B aw=ii(w);if(aw){w=en(A,av(8),0,w);};D nw=n(w);Q z=lna(A,nw);
   for(D i=0;i<nw;i++){
-    Q ni=pi(w,i);Q zi=vna(0,3,ls(w),ni);for(D j=0;j<ni;j++){pid(zi,j,j);}
+    Q ni=pi(w,i);
+    Q zi=vne_u(0, T_INT, 3, ni);
+    Q* out = (Q*)p(zi);
+    for(D j=0;j<ni;j++) out[j] = (Q)j;
     zid(z,i,zi);
   }
   return aw?car(A,av(6),0,z):z;
@@ -1832,12 +2158,14 @@ Q ng(B A,Q v,Q a,Q w){
   if(sw!=1) return ac(1);
   D nw=n(w);
   if(t(w)==T_FLT){
-    Q z=vna(0, T_FLT, 3, nw);
-    for(D i=0;i<nw;i++) pid(z,i, f64_bits(-num_f64_elem(w,i)) );
+    Q z=vne_u(0, T_FLT, 3, nw);
+    Q* out = (Q*)p(z);
+    for(D i=0;i<nw;i++) out[i] = f64_bits(-num_f64_elem(w,i));
     return z;
   }
-  Q z=vna(0, T_INT, 3, nw);
-  for(D i=0;i<nw;i++) pid(z,i, 0 - num_int_bits_elem(w,i) );
+  Q z=vne_u(0, T_INT, 3, nw);
+  Q* out = (Q*)p(z);
+  for(D i=0;i<nw;i++) out[i] = 0 - num_int_bits_elem(w,i);
   return z;
 }
 
@@ -1993,8 +2321,13 @@ Q its(B A,Q v,Q a,Q w){
 Q lg(B A, Q v, Q a, Q w);
 Q rl(B A, Q v, Q a, Q w);
 Q mt(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0};
+Q mxcsr(B A, Q v, Q a, Q w);
+Q setmxcsr(B A, Q v, Q a, Q w);
+Q ticks(B A, Q v, Q a, Q w);
+Q ev(B A, Q v, Q a, Q w);
+Q bench(B A, Q v, Q a, Q w);
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -2025,6 +2358,11 @@ static const BM VBM[VTZ]={
   /* 25 */ NB, // / (unimplemented monad)
   /* 26 */ NB, // % (unimplemented monad)
   /* 27 */ NB, // div (unimplemented monad)
+  /* 28 */ NB, // mxcsr
+  /* 29 */ NB, // setmxcsr
+  /* 30 */ NB, // ticks
+  /* 31 */ NB, // bench
+  /* 32 */ NB, // eval
 };
 
 static const BM VBD[VTZ]={
@@ -2056,8 +2394,13 @@ static const BM VBD[VTZ]={
   /* 25 */ DB, // /
   /* 26 */ DB, // %
   /* 27 */ DB, // div
+  /* 28 */ NB, // mxcsr
+  /* 29 */ NB, // setmxcsr
+  /* 30 */ NB, // ticks
+  /* 31 */ NB, // bench
+  /* 32 */ NB, // eval
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -2083,6 +2426,119 @@ Q rl(B A, Q v, Q a, Q w){
   if(t(f) == 34) return f;
   if(t(f) != 9) return ac(2);
   return file_read_log(f);
+}
+
+Q mxcsr(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a; (void)w;
+#if HAVE_MXCSR
+  return an((J)(D)_mm_getcsr());
+#else
+  return ac(2);
+#endif
+}
+
+Q setmxcsr(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+#if HAVE_MXCSR
+  if(t(w)!=T_INT || sh(w)!=0) return ac(2);
+  J val = (J)ra(w);
+  if(val < 0 || (Q)val > 0xFFFFFFFFULL) return ac(2);
+  D old = (D)_mm_getcsr();
+  _mm_setcsr((D)val);
+  return an((J)old);
+#else
+  (void)w;
+  return ac(2);
+#endif
+}
+
+Q ticks(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a; (void)w;
+  return an((J)now_ns_u64());
+}
+
+Q ev(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  if(t(w)!=6) return ac(2);
+  if(sh(w)==0){
+    C c = (C)ra(w);
+    return eval_code_tape(&c, 1);
+  }
+  if(sh(w)!=1) return ac(1);
+  return eval_code_tape((const C*)p(w), n(w));
+}
+
+Q bench(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  if(!ip(w) || t(w)!=0 || sh(w)!=1) return ac(2);
+  D nw = n(w);
+  if(nw!=2 && nw!=3 && nw!=4) return ac(2);
+
+  Q qn = qi(w, 0);
+  if(t(qn)!=T_INT || sh(qn)!=0) return ac(2);
+  J iters_j = (J)ra(qn);
+  if(iters_j < 0 || iters_j > 0x7FFFFFFF) return ac(2);
+  D iters = (D)iters_j;
+
+  B eval_mode = (nw==2);
+  Q verb = 0;
+  Q code = 0;
+  if(eval_mode){
+    code = qi(w, 1);
+    if(t(code)!=6) return ac(2);
+    if(!(sh(code)==0 || sh(code)==1)) return ac(1);
+  }else{
+    verb = qi(w, 1);
+    if(t(verb)==4){
+      if(!ip(verb) || sh(verb)!=1 || n(verb)!=1) return ac(2);
+      verb = pi(verb, 0);
+    }
+    if(t(verb)!=2) return ac(2);
+  }
+
+  B is_dyad = (nw==4);
+  Q alpha = 0;
+  Q omega = 0;
+  if(!eval_mode){
+    if(is_dyad){
+      alpha = qi(w, 2);
+      omega = qi(w, 3);
+    }else{
+      omega = qi(w, 2);
+    }
+  }
+
+  Q start = now_ns_u64();
+  Q last = tsna(0,4,1,3,0,0); // missing
+  for(D i=0;i<iters;i++){
+    // Rewind temp arena allocations each iteration (except the last) so benchmarks
+    // don't measure unbounded bump growth / page commits.
+    Q ai0_before = AI[0];
+    Q r;
+    if(eval_mode){
+      if(sh(code)==0){
+        C c = (C)ra(code);
+        r = eval_code_tape(&c, 1);
+      }else{
+        r = eval_code_tape((const C*)p(code), n(code));
+      }
+    }else{
+      r = is_dyad ? dispatch(VD, VBD, verb, alpha, omega) : dispatch(VM, VBM, verb, 0, omega);
+    }
+    if(i+1 < iters){
+      ir(r);
+      dr(r);
+      AI[0] = ai0_before;
+    }else{
+      last = r;
+    }
+  }
+  Q end = now_ns_u64();
+
+  Q z = ln(2);
+  zid(z, 0, an((J)(end - start)));
+  zid(z, 1, last);
+  return z;
 }
 
 Q Ap(Q a){Q p=tsna(0,4,1,3,1,1);pid(p,0,a);return p;}
@@ -2154,13 +2610,14 @@ Q edv(Q a,Q** q){
 }
 
 Q E(Q** q, C tc){
-  Q r = tsna(0,4,1,3,0,0);                                                        // "missing" by default
+  Q missing = tsna(0,4,1,3,0,0);                                                  // "missing" sentinel
+  Q r = missing;                                                                  // last statement result (or missing)
   D clp=LP;                                                                       // capture the list builder index for this call
   for(;;){
     Q a = **q;
     if(!a) break;
     if(tc && 34==t(a) && tc==dc(a)) break;
-    if(34==t(a) && ';'==dc(a)){(*q)++; continue;}                                 // ignore empty statements
+    if(34==t(a) && (';'==dc(a) || '\n'==dc(a))){(*q)++; continue;}                // ignore empty statements
     r=e(q);                                                                        // e() consumes exactly one expression
     if(tc==')' && !(4==t(r) && 0==n(r))){                                          // list literal capture (skip "missing")
       Q v = r;
@@ -2175,7 +2632,11 @@ Q E(Q** q, C tc){
       Q l2=xn(l,1); if(34==t(l2)) return l2; if(l2!=l) NL[clp]=l2;
       zid(NL[clp],idx,v);
     }
-    if(**q && 34==t(**q) && ';'==dc(**q)) (*q)++;                                  // consume statement terminator if present
+    if(**q && 34==t(**q) && (';'==dc(**q) || '\n'==dc(**q))){                      // consume statement terminator if present
+      C sep = (C)dc(**q);
+      (*q)++;
+      if(sep==';') r = missing;                                                   // trailing ';' suppresses the statement result
+    }
   }
   return r;
 }
@@ -2185,18 +2646,18 @@ Q e(Q** q){
   if(!a) return tsna(0,4,1,3,0,0);                                              // missing
   if(34==t(a)){
     C c = (C)dc(a);
-    if(';'==c){(*q)++; return tsna(0,4,1,3,0,0);}                                // terminator => missing
+    if(';'==c || '\n'==c){(*q)++; return tsna(0,4,1,3,0,0);}                     // terminator => missing
     if('{'==c){
       Q noun = eoc(q);
       Q w = **q;
-      B end = !w || (34==t(w) && (';'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+      B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w)));
       if(!end && w && 2==t(w)) return edv(noun, q);                              // allow `{...}v w`
       return noun;
     }
     if('('==c){
       Q noun = eol(q);
       Q w = **q;
-      B end = !w || (34==t(w) && (';'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+      B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w)));
       if(!end && w && 2==t(w)) return edv(noun, q);                              // allow `(a;b)v w`
       return noun;
     }
@@ -2205,7 +2666,7 @@ Q e(Q** q){
   }
 
   Q w=(*q)[1];                                                                   // safe: token streams are 0-terminated
-  B end = !w || (34==t(w) && (';'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+  B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w)));
 
   if(2==t(a) && !end) return emv(q);                                             // monadic verb chain
   if(2==t(a) && end){(*q)++; return Ap(a);}                                      // partial at end-of-expression
@@ -2272,7 +2733,7 @@ static inline double parse_f10(const C* s, D len){
   C tmp_small[128];
   C* tmp = tmp_small;
   if(len >= (D)sizeof(tmp_small)){
-    tmp = (C*)malloc((size_t)len + 1);
+    tmp = (C*)os_heap_alloc((Q)len + 1ULL);
     if(!tmp) return 0.0;
   }
   memcpy(tmp, s, (size_t)len);
@@ -2280,7 +2741,7 @@ static inline double parse_f10(const C* s, D len){
   errno = 0;
   C* endp = 0;
   double x = strtod(tmp, &endp);
-  if(tmp != tmp_small) free(tmp);
+  if(tmp != tmp_small) os_heap_free(tmp);
   // The lexer guarantees a numeric-ish token, but keep this strict anyway.
   if(errno || !endp || *endp) return 0.0;
   return x;
@@ -2363,9 +2824,10 @@ static Q eval_code_tape(const C* src, D len){
   if(!src || !len) return 0;
   if(len >= 3 && (B)src[0]==0xEF && (B)src[1]==0xBB && (B)src[2]==0xBF){ src += 3; len -= 3; } // skip UTF-8 BOM
   Q* tokens_base = lx_len(src, len);
+  if(!tokens_base) return ac(2);
   Q* tokens = tokens_base;
   Q r = E(&tokens, '\0');
-  free(tokens_base);
+  os_heap_free(tokens_base);
   return r;
 }
 
@@ -2380,13 +2842,16 @@ static Q eval_code_file(const char* fn){
 }
 
 Q* lx_len(const C* b, D l){
-  Q*q=malloc(sizeof(Q)*(l+1));D qi=0;const C*p=b;const C* end=b+l;D st=0; // st:state
+  Q* q=(Q*)os_heap_alloc((Q)sizeof(Q) * (Q)(l+1)); if(!q) return 0;
+  D qi=0;const C*p=b;const C* end=b+l;D st=0; // st:state
   while(st!=7){
     if(p>=end){st=7;break;}
 
-    // Statement separators: treat both ';' and newlines as the same separator token.
-    if(*p=='\n'){q[qi++]=ac(';');p++;st=0;continue;}
-    if(*p=='\r'){q[qi++]=ac(';');p++;if(p<end && *p=='\n')p++;st=0;continue;}
+    // Statement separators:
+    // - Newlines separate statements but do not suppress the last value.
+    // - ';' separates statements AND suppresses the value of the preceding statement.
+    if(*p=='\n'){q[qi++]=ac('\n');p++;st=0;continue;}
+    if(*p=='\r'){q[qi++]=ac('\n');p++;if(p<end && *p=='\n')p++;st=0;continue;}
     if(*p==';'){q[qi++]=ac(';');p++;st=0;continue;}
     if(*p=='\t'){p++;continue;}
 
@@ -2440,7 +2905,7 @@ Q* lx_len(const C* b, D l){
         if(st==1||st==2||st==3||st==8 || st==4){
           C tmp_small[100];C* t=tmp_small;
           if(len >= (D)sizeof(tmp_small)){
-            t=(C*)malloc((size_t)len+1);
+            t=(C*)os_heap_alloc((Q)len + 1ULL);
             if(!t){q[qi]=0;return q;}
           }
           memcpy(t,s,(size_t)len);t[len]=0;
@@ -2451,7 +2916,7 @@ Q* lx_len(const C* b, D l){
             if(vi) q[qi++]=av(vi); else if(ai) q[qi++]=aa(ai);
             else q[qi++]=ar(parse_b(t,len,62));
           }
-          if(t!=tmp_small) free(t);
+          if(t!=tmp_small) os_heap_free(t);
         }
         else if(st==6){ q[qi++]=as(parse_b(s+1,len-1,62));}
         else if(st==5){ s++; len--; Q z=vna(0,6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z; if(p<end)p++;}
@@ -2491,20 +2956,20 @@ static C* read_line(FILE* in){
   if(!in) return 0;
   size_t cap = 256;
   size_t len = 0;
-  C* buf = (C*)malloc(cap);
+  C* buf = (C*)os_heap_alloc((Q)cap);
   if(!buf) return 0;
   for(;;){
     int ch = fgetc(in);
     if(ch == EOF){
-      if(len == 0){ free(buf); return 0; }
+      if(len == 0){ os_heap_free(buf); return 0; }
       break;
     }
     if(ch == '\n') break;
     if(ch == '\r') continue;
     if(len + 1 >= cap){
       cap *= 2;
-      C* nb = (C*)realloc(buf, cap);
-      if(!nb){ free(buf); return 0; }
+      C* nb = (C*)os_heap_realloc(buf, (Q)cap);
+      if(!nb){ os_heap_free(buf); return 0; }
       buf = nb;
     }
     buf[len++] = (C)ch;
@@ -2553,8 +3018,8 @@ I main(I argc, C** argv){
     printf(" ");
     C* line = read_line(stdin);
     if(!line) break;
-    if(strcmp(line, "\\\\") == 0){ free(line); break; }
-    if(!*line){ free(line); continue; }
+    if(strcmp(line, "\\\\") == 0){ os_heap_free(line); break; }
+    if(!*line){ os_heap_free(line); continue; }
     if(0==SP && 0==LP){
       for(D i=0;i<n(pi(SC[0],1));i++){
         Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
@@ -2563,6 +3028,7 @@ I main(I argc, C** argv){
       AI[0]=1;SC[0]=dni(0,3,0,0); SP=0; 
      } // reset THI only if evaluation takes us back to the global scope. 
     Q* tokens_base = lx_len(line, (D)strlen(line));
+    if(!tokens_base){ os_heap_free(line); pr(ac(2)); printf("\n"); continue; }
     Q* tokens = tokens_base;
     Q r;
     if(LP>0){
@@ -2577,9 +3043,9 @@ I main(I argc, C** argv){
     }else{
       r=E(&tokens,'\0');
     }
-    free(tokens_base);
+    os_heap_free(tokens_base);
     pr(r);printf("\n");
-    free(line);
+    os_heap_free(line);
   }
   return 0;
 }

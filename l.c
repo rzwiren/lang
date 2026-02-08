@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <math.h>
 #if defined(_MSC_VER)
   #include <intrin.h>
   #include <malloc.h>
@@ -21,9 +23,22 @@
 
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
 typedef long long J; typedef int I; typedef short H;
-typedef Q(*RDO)(Q,Q);                                                           // function pointer for raw dyadic operation
-typedef Q(*RMO)(Q);                                                             // function pointer for raw monadic operation
 typedef Q(*VF)(B,Q,Q,Q);                                                        // function pointer for verb/adverb (arena;verb;alpha;omega)
+
+#define T_INT   3
+#define T_CHAR  6
+#define T_SYM   7
+#define T_FLT   8
+
+static inline Q f64_bits(double x){ Q b=0; memcpy(&b, &x, sizeof(b)); return b; }
+static inline double f64_from_bits(Q b){ double x=0; memcpy(&x, &b, sizeof(x)); return x; }
+
+// Signed 60-bit immediate integers (type tag == 3). Other immediate tags use unsigned payloads.
+static inline Q di_int(Q q){
+  Q x = q >> 4; // 60-bit payload
+  if(x & (1ULL<<59)) x |= 0xF000000000000000ULL; // sign extend into top 4 bits
+  return x;
+}
 
 #define BUMP_UNIT_BYTES   16
 #define BUDDY_UNIT_BYTES  4096
@@ -40,6 +55,7 @@ B ha(Q q){return (q>>4)&3;}
 Q FT_addr=0, FT_sz=0, FT_cap=0, FT_h=0, FT_fn=0;
 Q hp(B a,Q q){return q>>(0==a?6:1==a?11:6);}
 Q pi(Q q,D i);
+static inline Q af(Q ar, double x);
 Q* ptr(Q q){
   B a=ha(q);
   if(a==2){
@@ -62,7 +78,13 @@ Q ar(Q r){return (r<<4)|1;}                                                   //
 Q av(Q v){return (v<<6)|2;}                                                   // create a verb atom (grammatical type 2, subtype 0)
 Q aa(Q a){return (a<<6)|(1<<4)|2;}                                            // create an adverb atom (grammatical type 2, subtype 1)
 Q ac(Q c){return (c<<6)|(2<<4)|2;}                                            // create a control atom (grammatical type 2, subtype 2)
-Q an(Q n){return (n<(1ULL<<60))?((n<<4)|3):(0|3);}                            // create an atom of type 3 (integer) TODO: heap allocated 64 bit int. return 3 as a tagged 0 for stuff that should really be allocated on heap. bitnot is broken on atoms due to this. 
+Q an(J n){                                                                    // create an atom of type 3 (signed 60-bit immediate integer)
+  if(n >= -(1LL<<59) && n < (1LL<<59)){
+    Q payload = ((Q)n) & ((1ULL<<60)-1ULL);
+    return (payload<<4) | T_INT;
+  }
+  return (0|T_INT);                                                           // TODO: heap allocate 64-bit int when out of immediate range
+}
 Q ap(Q v){return (v<<4)|4;}                                                   // create an atom of type 4 (partial eval) - HEAP ONLY
                                                                               // type 5 is hash
 Q ach(C c){return ((Q)(B)c<<4)|6;}                                            // create an atom of type 6 (char)
@@ -341,17 +363,15 @@ Q qi(Q q,D i){B s=sh(q),tq=t(q);
 }              // get at index, return tagged Q
 Q ra(Q q){                                                                      // read atom
   if(sh(q)){printf("ra: not an atom\n");return ac(1);}
-  // Heap atoms store their payload in element 0; tagged atoms store it in the tag bits.
-  Q payload = ip(q) ? pi(q,0) : di(q);
   switch(t(q)){
-    case 1:  return payload;
-    case 2:  return payload;                                                     // verbs are atoms; payload is the verb id
-    case 3:  return payload;
-    case 7:  return payload;
-    case 6:  return payload;
-    case 18: return payload;
-    case 34: return payload;
-    case 8:  return payload;                                                     // needs type 9 here
+    case 1:  return ip(q) ? pi(q,0) : di(q);
+    case 2:  return ip(q) ? pi(q,0) : (q>>6);                                    // verbs are atoms; payload is the verb id
+    case 3:  return ip(q) ? pi(q,0) : di_int(q);
+    case 6:  return ip(q) ? pi(q,0) : di(q);
+    case 7:  return ip(q) ? pi(q,0) : di(q);
+    case 8:  return ip(q) ? pi(q,0) : di(q);                                     // float payload bits (heap atoms only today)
+    case 18: return ip(q) ? pi(q,0) : (q>>6);
+    case 34: return ip(q) ? pi(q,0) : (q>>6);
     default: return ac(5);                                                      // not yet implemented
   }
 }
@@ -448,6 +468,7 @@ static inline Q atom_payload_for_hash(Q q){
   if(ip(q)) return pi(q, 0);
   B tq = t(q);
   if(tq==2 || tq==18 || tq==34) return q>>6;
+  if(tq==3) return di_int(q);
   return di(q);
 }
 static Q qhash_struct(Q q, Q* stack, D depth){
@@ -1086,11 +1107,27 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 25
+#define VTZ 28
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 void pr_b(Q q,D b){if(q<b){printf("%c",MAP[q]);return;}pr_b(q/b,b);printf("%c",MAP[q%b]);}
+
+static inline void pr_f64(double x){
+  if(isnan(x)){ printf("nan"); return; }
+  if(isinf(x)){ printf("%sinf", x<0 ? "-" : ""); return; }
+  C buf[80];
+#if defined(_MSC_VER)
+  int n = _snprintf(buf, sizeof(buf), "%.17g", x);
+#else
+  int n = snprintf(buf, sizeof(buf), "%.17g", x);
+#endif
+  if(n <= 0){ printf("nan"); return; }
+  B has_dot=0, has_exp=0;
+  for(int i=0;i<n;i++){ if(buf[i]=='.') has_dot=1; else if(buf[i]=='e' || buf[i]=='E') has_exp=1; }
+  if(!has_dot && !has_exp) printf("%s.0", buf);
+  else printf("%s", buf);
+}
 
 void pr(Q q){
   if(0==q){return;}
@@ -1131,8 +1168,18 @@ void pr(Q q){
     if(1==sh(q)){printf("\"");for(D i=0;i<n(q);i++)printf("%c",(char)pi(q,i));printf("\"");}
   }
   if(3==t(q)){
-    if(0==sh(q)){printf("%lld",(long long)(ip(q)?pi(q,0):di(q)));}
+    if(0==sh(q)){printf("%lld",(long long)(ip(q)?pi(q,0):di_int(q)));}
     if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld",pi(q,i));if(i<n(q)-1){printf(" ");}}} else {printf("!0");}}
+  }
+  if(8==t(q)){
+    if(0==sh(q)){ pr_f64(f64_from_bits(pi(q,0))); }
+    if(1==sh(q)){
+      if(n(q)){
+        for(D i=0;i<n(q);i++){ pr_f64(f64_from_bits(pi(q,i))); if(i<n(q)-1) printf(" "); }
+      }else{
+        printf("!0");
+      }
+    }
   }
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   if(5==t(q)){printf("hash table: ");for(D i=0;i<cp(q);i++){printf("%d:%lld ",i,pi(q,i));}printf("\n");}
@@ -1238,14 +1285,453 @@ Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
 
 Q car(B A,Q v,Q a,Q w){return 0==sh(w)?w:qi(w,0);}
 
-Q math_m(Q w,RMO op){ // TODO: arena awareness
-  if(0==sh(w)){return an(op(ra(w)));}
-  Q z=vna(0,t(w),ls(w),n(w));
-  for(D i=0;i<n(w);i++){pid(z,i,op(ri(w,i)));}
+static inline B is_num_type(B tq){ return tq==T_INT || tq==T_FLT; }
+static inline Q num_int_bits_atom(Q q){ return ip(q) ? pi(q,0) : di_int(q); }
+static inline Q num_int_bits_elem(Q q, D i){ return sh(q) ? pi(q,i) : num_int_bits_atom(q); }
+static inline double num_f64_atom(Q q){
+  B tq=t(q);
+  if(tq==T_FLT) return f64_from_bits(pi(q,0));
+  return (double)(J)(ip(q) ? pi(q,0) : di_int(q));
+}
+static inline double num_f64_elem(Q q, D i){
+  B tq=t(q);
+  if(sh(q)){
+    Q bits = pi(q,i);
+    return tq==T_FLT ? f64_from_bits(bits) : (double)(J)bits;
+  }
+  return num_f64_atom(q);
+}
+
+static inline J floordiv_j(J a, J b){
+  // Requires b != 0. Floors toward -inf (Python-style).
+  J q = a / b;
+  J r = a % b;
+  if(r && ((r > 0) != (b > 0))) q -= 1;
+  return q;
+}
+static inline J floormod_j(J a, J b){
+  // Requires b != 0. Remainder has sign of b and magnitude < |b|.
+  J r = a % b;
+  if(r && ((r > 0) != (b > 0))) r += b;
+  return r;
+}
+
+typedef enum {
+  NOP_ADD,
+  NOP_MUL,
+  NOP_SUB,
+  NOP_MIN,
+  NOP_MAX,
+  NOP_EQ,
+  NOP_LT,
+  NOP_GT,
+  NOP_DIV,      // always float
+  NOP_MOD,      // int: floored mod; float: fmod
+  NOP_FLOORDIV, // int-only
+  NOP_BAND,     // int-only bitwise and
+  NOP_BOR,      // int-only bitwise or
+  NOP_BXOR      // int-only bitwise xor
+  ,NOP__N
+} NOP;
+
+typedef enum {NOUT_PROMOTE, NOUT_BOOL, NOUT_FLOAT, NOUT_INT} NOUT;
+typedef struct { B require_int; NOUT out; } NumOpSpec;
+
+static const NumOpSpec NUMOPS[] = {
+  /* NOP_ADD      */ {0, NOUT_PROMOTE},
+  /* NOP_MUL      */ {0, NOUT_PROMOTE},
+  /* NOP_SUB      */ {0, NOUT_PROMOTE},
+  /* NOP_MIN      */ {0, NOUT_PROMOTE},
+  /* NOP_MAX      */ {0, NOUT_PROMOTE},
+  /* NOP_EQ       */ {0, NOUT_BOOL},
+  /* NOP_LT       */ {0, NOUT_BOOL},
+  /* NOP_GT       */ {0, NOUT_BOOL},
+  /* NOP_DIV      */ {0, NOUT_FLOAT},
+  /* NOP_MOD      */ {0, NOUT_PROMOTE},
+  /* NOP_FLOORDIV */ {1, NOUT_INT},
+  /* NOP_BAND     */ {1, NOUT_INT},
+  /* NOP_BOR      */ {1, NOUT_INT},
+  /* NOP_BXOR     */ {1, NOUT_INT},
+};
+
+static inline const NumOpSpec* numop_spec(NOP op){
+  if((D)op >= (D)(sizeof(NUMOPS)/sizeof(NUMOPS[0]))) return 0;
+  return &NUMOPS[(D)op];
+}
+
+typedef Q(*NumKernel)(Q a, Q w, B sa, B sw, D nz);
+
+static Q k_add_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return af(0, num_f64_atom(a) + num_f64_atom(w));
+  Q z=vna(0, T_FLT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x = num_f64_elem(a, sa?i:0);
+    double y = num_f64_elem(w, sw?i:0);
+    pid(z, i, f64_bits(x + y));
+  }
   return z;
 }
-Q nt_aa(Q w){return !w;}
-Q nt(B A,Q v,Q a,Q w){ return math_m(w,nt_aa); }
+static Q k_mul_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return af(0, num_f64_atom(a) * num_f64_atom(w));
+  Q z=vna(0, T_FLT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x = num_f64_elem(a, sa?i:0);
+    double y = num_f64_elem(w, sw?i:0);
+    pid(z, i, f64_bits(x * y));
+  }
+  return z;
+}
+static Q k_sub_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return af(0, num_f64_atom(a) - num_f64_atom(w));
+  Q z=vna(0, T_FLT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x = num_f64_elem(a, sa?i:0);
+    double y = num_f64_elem(w, sw?i:0);
+    pid(z, i, f64_bits(x - y));
+  }
+  return z;
+}
+static Q k_min_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0){ double x=num_f64_atom(a), y=num_f64_atom(w); return af(0, x<y?x:y); }
+  Q z=vna(0, T_FLT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x = num_f64_elem(a, sa?i:0);
+    double y = num_f64_elem(w, sw?i:0);
+    pid(z, i, f64_bits(x<y?x:y));
+  }
+  return z;
+}
+static Q k_max_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0){ double x=num_f64_atom(a), y=num_f64_atom(w); return af(0, x>y?x:y); }
+  Q z=vna(0, T_FLT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x = num_f64_elem(a, sa?i:0);
+    double y = num_f64_elem(w, sw?i:0);
+    pid(z, i, f64_bits(x>y?x:y));
+  }
+  return z;
+}
+static Q k_div_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return af(0, num_f64_atom(a) / num_f64_atom(w));
+  Q z=vna(0, T_FLT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x = num_f64_elem(a, sa?i:0);
+    double y = num_f64_elem(w, sw?i:0);
+    pid(z, i, f64_bits(x / y));
+  }
+  return z;
+}
+static Q k_mod_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return af(0, fmod(num_f64_atom(a), num_f64_atom(w)));
+  Q z=vna(0, T_FLT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x = num_f64_elem(a, sa?i:0);
+    double y = num_f64_elem(w, sw?i:0);
+    pid(z, i, f64_bits(fmod(x, y)));
+  }
+  return z;
+}
+
+static Q k_add_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) + num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    Q x = num_int_bits_elem(a, sa?i:0);
+    Q y = num_int_bits_elem(w, sw?i:0);
+    pid(z, i, x + y);
+  }
+  return z;
+}
+static Q k_mul_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) * num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    Q x = num_int_bits_elem(a, sa?i:0);
+    Q y = num_int_bits_elem(w, sw?i:0);
+    pid(z, i, x * y);
+  }
+  return z;
+}
+static Q k_sub_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) - num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    Q x = num_int_bits_elem(a, sa?i:0);
+    Q y = num_int_bits_elem(w, sw?i:0);
+    pid(z, i, x - y);
+  }
+  return z;
+}
+static Q k_min_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0){
+    Q x=num_int_bits_atom(a), y=num_int_bits_atom(w);
+    return an((J)(((J)x < (J)y) ? x : y));
+  }
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    Q x = num_int_bits_elem(a, sa?i:0);
+    Q y = num_int_bits_elem(w, sw?i:0);
+    pid(z, i, ((J)x < (J)y) ? x : y);
+  }
+  return z;
+}
+static Q k_max_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0){
+    Q x=num_int_bits_atom(a), y=num_int_bits_atom(w);
+    return an((J)(((J)x > (J)y) ? x : y));
+  }
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    Q x = num_int_bits_elem(a, sa?i:0);
+    Q y = num_int_bits_elem(w, sw?i:0);
+    pid(z, i, ((J)x > (J)y) ? x : y);
+  }
+  return z;
+}
+static Q k_band_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) & num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    Q x = num_int_bits_elem(a, sa?i:0);
+    Q y = num_int_bits_elem(w, sw?i:0);
+    pid(z, i, x & y);
+  }
+  return z;
+}
+static Q k_bor_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) | num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    Q x = num_int_bits_elem(a, sa?i:0);
+    Q y = num_int_bits_elem(w, sw?i:0);
+    pid(z, i, x | y);
+  }
+  return z;
+}
+static Q k_bxor_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) ^ num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    Q x = num_int_bits_elem(a, sa?i:0);
+    Q y = num_int_bits_elem(w, sw?i:0);
+    pid(z, i, x ^ y);
+  }
+  return z;
+}
+static Q k_mod_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0){
+    J y=(J)num_int_bits_atom(w); if(!y) return ac(2);
+    return an(floormod_j((J)num_int_bits_atom(a), y));
+  }
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    J y=(J)num_int_bits_elem(w, sw?i:0); if(!y) return ac(2);
+    J x=(J)num_int_bits_elem(a, sa?i:0);
+    pid(z, i, (Q)floormod_j(x, y));
+  }
+  return z;
+}
+static Q k_floordiv_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0){
+    J y=(J)num_int_bits_atom(w); if(!y) return ac(2);
+    return an(floordiv_j((J)num_int_bits_atom(a), y));
+  }
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    J y=(J)num_int_bits_elem(w, sw?i:0); if(!y) return ac(2);
+    J x=(J)num_int_bits_elem(a, sa?i:0);
+    pid(z, i, (Q)floordiv_j(x, y));
+  }
+  return z;
+}
+
+static Q k_eq_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_f64_atom(a) == num_f64_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x=num_f64_elem(a, sa?i:0), y=num_f64_elem(w, sw?i:0);
+    pid(z, i, (Q)(x==y));
+  }
+  return z;
+}
+static Q k_lt_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_f64_atom(a) < num_f64_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x=num_f64_elem(a, sa?i:0), y=num_f64_elem(w, sw?i:0);
+    pid(z, i, (Q)(x<y));
+  }
+  return z;
+}
+static Q k_gt_f(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)(num_f64_atom(a) > num_f64_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    double x=num_f64_elem(a, sa?i:0), y=num_f64_elem(w, sw?i:0);
+    pid(z, i, (Q)(x>y));
+  }
+  return z;
+}
+static Q k_eq_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) == (J)num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    J x=(J)num_int_bits_elem(a, sa?i:0), y=(J)num_int_bits_elem(w, sw?i:0);
+    pid(z, i, (Q)(x==y));
+  }
+  return z;
+}
+static Q k_lt_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) < (J)num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    J x=(J)num_int_bits_elem(a, sa?i:0), y=(J)num_int_bits_elem(w, sw?i:0);
+    pid(z, i, (Q)(x<y));
+  }
+  return z;
+}
+static Q k_gt_i(Q a,Q w,B sa,B sw,D nz){
+  if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) > (J)num_int_bits_atom(w)));
+  Q z=vna(0, T_INT, 3, nz);
+  for(D i=0;i<nz;i++){
+    J x=(J)num_int_bits_elem(a, sa?i:0), y=(J)num_int_bits_elem(w, sw?i:0);
+    pid(z, i, (Q)(x>y));
+  }
+  return z;
+}
+
+static const NumKernel K_F64[NOP__N] = {
+  /* NOP_ADD      */ k_add_f,
+  /* NOP_MUL      */ k_mul_f,
+  /* NOP_SUB      */ k_sub_f,
+  /* NOP_MIN      */ k_min_f,
+  /* NOP_MAX      */ k_max_f,
+  /* NOP_EQ       */ 0,
+  /* NOP_LT       */ 0,
+  /* NOP_GT       */ 0,
+  /* NOP_DIV      */ k_div_f,
+  /* NOP_MOD      */ k_mod_f,
+  /* NOP_FLOORDIV */ 0,
+  /* NOP_BAND     */ 0,
+  /* NOP_BOR      */ 0,
+  /* NOP_BXOR     */ 0,
+};
+static const NumKernel K_I64[NOP__N] = {
+  /* NOP_ADD      */ k_add_i,
+  /* NOP_MUL      */ k_mul_i,
+  /* NOP_SUB      */ k_sub_i,
+  /* NOP_MIN      */ k_min_i,
+  /* NOP_MAX      */ k_max_i,
+  /* NOP_EQ       */ 0,
+  /* NOP_LT       */ 0,
+  /* NOP_GT       */ 0,
+  /* NOP_DIV      */ 0,
+  /* NOP_MOD      */ k_mod_i,
+  /* NOP_FLOORDIV */ k_floordiv_i,
+  /* NOP_BAND     */ k_band_i,
+  /* NOP_BOR      */ k_bor_i,
+  /* NOP_BXOR     */ k_bxor_i,
+};
+static const NumKernel K_CMP_F64[NOP__N] = {
+  /* NOP_ADD      */ 0,
+  /* NOP_MUL      */ 0,
+  /* NOP_SUB      */ 0,
+  /* NOP_MIN      */ 0,
+  /* NOP_MAX      */ 0,
+  /* NOP_EQ       */ k_eq_f,
+  /* NOP_LT       */ k_lt_f,
+  /* NOP_GT       */ k_gt_f,
+  /* NOP_DIV      */ 0,
+  /* NOP_MOD      */ 0,
+  /* NOP_FLOORDIV */ 0,
+  /* NOP_BAND     */ 0,
+  /* NOP_BOR      */ 0,
+  /* NOP_BXOR     */ 0,
+};
+static const NumKernel K_CMP_I64[NOP__N] = {
+  /* NOP_ADD      */ 0,
+  /* NOP_MUL      */ 0,
+  /* NOP_SUB      */ 0,
+  /* NOP_MIN      */ 0,
+  /* NOP_MAX      */ 0,
+  /* NOP_EQ       */ k_eq_i,
+  /* NOP_LT       */ k_lt_i,
+  /* NOP_GT       */ k_gt_i,
+  /* NOP_DIV      */ 0,
+  /* NOP_MOD      */ 0,
+  /* NOP_FLOORDIV */ 0,
+  /* NOP_BAND     */ 0,
+  /* NOP_BOR      */ 0,
+  /* NOP_BXOR     */ 0,
+};
+
+static inline NumKernel kernel_f64(NOP op){ return (op>=0 && op<NOP__N) ? K_F64[op] : 0; }
+static inline NumKernel kernel_i64(NOP op){ return (op>=0 && op<NOP__N) ? K_I64[op] : 0; }
+static inline NumKernel kernel_cmp_f64(NOP op){ return (op>=0 && op<NOP__N) ? K_CMP_F64[op] : 0; }
+static inline NumKernel kernel_cmp_i64(NOP op){ return (op>=0 && op<NOP__N) ? K_CMP_I64[op] : 0; }
+
+static Q num_binop(NOP op, Q a, Q w){
+  const NumOpSpec* sp = numop_spec(op);
+  if(!sp) return ac(2);
+
+  B ta=t(a), tw=t(w);
+  if(sp->require_int){
+    if(ta!=T_INT || tw!=T_INT) return ac(2);
+  }else{
+    if(!is_num_type(ta) || !is_num_type(tw)) return ac(2);
+  }
+
+  B sa=sh(a), sw=sh(w);
+  if(sa>1 || sw>1) return ac(1);
+  D na=n(a), nw=n(w);
+  if(sa==1 && sw==1 && na!=nw) return ac(2);
+
+  D nz = (sa==1) ? na : (sw==1) ? nw : 1;
+
+  B use_f_in = (ta==T_FLT) || (tw==T_FLT);
+  B out_f = (sp->out==NOUT_FLOAT) ? 1 : (sp->out==NOUT_PROMOTE ? use_f_in : 0);
+  B out_bool = (sp->out==NOUT_BOOL);
+
+  NumKernel k = 0;
+  if(out_bool){
+    k = use_f_in ? kernel_cmp_f64(op) : kernel_cmp_i64(op);
+  }else if(out_f){
+    k = kernel_f64(op);
+  }else{
+    k = kernel_i64(op);
+  }
+  return k ? k(a, w, sa, sw, nz) : ac(2);
+}
+
+static Q int_bit_not(Q w){
+  if(t(w)!=T_INT) return ac(2);
+  B sw=sh(w);
+  if(sw==0) return an((J)(~num_int_bits_atom(w)));
+  if(sw!=1) return ac(1);
+  D nw=n(w);
+  Q z=vna(0, T_INT, 3, nw);
+  for(D i=0;i<nw;i++) pid(z, i, ~num_int_bits_elem(w, i));
+  return z;
+}
+
+Q nt(B A,Q v,Q a,Q w){
+  (void)A; (void)v; (void)a;
+  if(!is_num_type(t(w))) return ac(2);
+  B sw=sh(w);
+  if(sw==0){
+    if(t(w)==T_FLT) return an(num_f64_atom(w)==0.0);
+    return an((J)(num_int_bits_atom(w)==0));
+  }
+  if(sw!=1) return ac(1);
+  D nw=n(w);
+  Q z=vna(0, T_INT, 3, nw);
+  if(t(w)==T_FLT){
+    for(D i=0;i<nw;i++) pid(z,i, num_f64_elem(w,i)==0.0 );
+  }else{
+    for(D i=0;i<nw;i++) pid(z,i, num_int_bits_elem(w,i)==0 );
+  }
+  return z;
+}
 
 Q tl(B A,Q v,Q a,Q w){
   B aw=ii(w);if(aw){w=en(A,av(8),0,w);};D nw=n(w);Q z=lna(A,nw);
@@ -1267,47 +1753,26 @@ Q at(B A,Q v,Q a,Q w){
   return z;
 }
 
-Q math(Q a,Q w,RDO op){ // anything that gets here has been broadcasted. we can use the universal getter on both a and w
-  D na=n(a),nw=n(w);D nz=na<nw?nw:na;B sa=sh(a),sw=sh(w);B shz=sh(a)<sh(w)?sh(w):sh(a);B lz=ls(a)<ls(w)?ls(w):ls(a);
-  if(0==shz){return an(op(ra(a),ra(w)));}
-  Q z=vna(0,t(a),lz,nz); // TODO: arena awareness
-  for(D i=0;i<nz;i++){Q ai=sa?ri(a,i):ra(a);Q wi=sw?ri(w,i):ra(w);
-    Q zi=op(ai,wi);
-    pid(z,i,zi);
-  }
-  return z;
-}
-Q pl_aa(Q a,Q w){ return a+w;}
-Q ml_aa(Q a,Q w){ return a*w;}
-Q mn_aa(Q a,Q w){return a<w?a:w;}
-Q mx_aa(Q a,Q w){return a>w?a:w;}
-Q eq_aa(Q a,Q w){return a==w;}
-Q lt_aa(Q a,Q w){return a<w;}
-Q gt_aa(Q a,Q w){return a>w;}
-Q an_aa(Q a,Q w){return a&w;}
-Q or_aa(Q a,Q w){return a|w;}
-Q xr_aa(Q a,Q w){return a^w;}
-Q sb_aa(Q a,Q w){return a-w;}
-
-Q bn_aa(Q w){return ~w;}
-Q ng_aa(Q w){return -w;}
-
-Q pl(B A,Q v,Q a,Q w){ return math(a,w,pl_aa); } // later: float support and type promotion.
-Q ml(B A,Q v,Q a,Q w){ return math(a,w,ml_aa); }
-Q mn(B A,Q v,Q a,Q w){ return math(a,w,mn_aa); }
-Q mx(B A,Q v,Q a,Q w){ return math(a,w,mx_aa); }
-Q eq(B A,Q v,Q a,Q w){ return math(a,w,eq_aa); }
-Q lt(B A,Q v,Q a,Q w){ return math(a,w,lt_aa); }
-Q gt(B A,Q v,Q a,Q w){ return math(a,w,gt_aa); }
-Q nd(B A,Q v,Q a,Q w){ return math(a,w,an_aa); }
-Q or(B A,Q v,Q a,Q w){ return math(a,w,or_aa); }
-Q xr(B A,Q v,Q a,Q w){ return math(a,w,xr_aa); }
-Q sb(B A,Q v,Q a,Q w){ return math(a,w,sb_aa); }
+Q pl(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_ADD, a, w); }
+Q ml(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_MUL, a, w); }
+Q mn(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_MIN, a, w); }
+Q mx(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_MAX, a, w); }
+Q eq(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_EQ, a, w); }
+Q lt(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_LT, a, w); }
+Q gt(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_GT, a, w); }
+Q nd(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_BAND, a, w); }
+Q or(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_BOR, a, w); }
+Q xr(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_BXOR, a, w); }
+Q sb(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_SUB, a, w); }
+Q dvv(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_DIV, a, w); }   // /
+Q md(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_MOD, a, w); }    // %
+Q idv(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_FLOORDIV, a, w); } // div
 
 static inline Q atom_payload_for_match(Q q){
   if(ip(q)) return pi(q, 0);
   B tq = t(q);
   if(tq==2 || tq==18 || tq==34) return q>>6; // grammatical atoms store payload above bit 6
+  if(tq==3) return di_int(q);
   return di(q);
 }
 
@@ -1351,8 +1816,30 @@ Q mt(B A,Q v,Q a,Q w){
   return an(match_struct(a, w, 0) ? 1 : 0);
 }
 
-Q bn(B A,Q v,Q a,Q w){ return math_m(w,bn_aa); }
-Q ng(B A,Q v,Q a,Q w){ return math_m(w,ng_aa); }
+Q bn(B A,Q v,Q a,Q w){
+  (void)A; (void)v; (void)a;
+  return int_bit_not(w);
+}
+Q ng(B A,Q v,Q a,Q w){
+  (void)A; (void)v; (void)a;
+  if(!is_num_type(t(w))) return ac(2);
+  B sw=sh(w);
+  if(sw==0){
+    if(t(w)==T_FLT) return af(0, -num_f64_atom(w));
+    Q bits = num_int_bits_atom(w);
+    return an((J)(0 - bits));
+  }
+  if(sw!=1) return ac(1);
+  D nw=n(w);
+  if(t(w)==T_FLT){
+    Q z=vna(0, T_FLT, 3, nw);
+    for(D i=0;i<nw;i++) pid(z,i, f64_bits(-num_f64_elem(w,i)) );
+    return z;
+  }
+  Q z=vna(0, T_INT, 3, nw);
+  for(D i=0;i<nw;i++) pid(z,i, 0 - num_int_bits_elem(w,i) );
+  return z;
+}
 
 Q set(Q a,Q w,D sp){
   Q d = SC[sp];
@@ -1506,8 +1993,8 @@ Q its(B A,Q v,Q a,Q w){
 Q lg(B A, Q v, Q a, Q w);
 Q rl(B A, Q v, Q a, Q w);
 Q mt(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl};
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -1535,6 +2022,9 @@ static const BM VBM[VTZ]={
   /* 22 */ NB, // root
   /* 23 */ NB, // log
   /* 24 */ NB, // readlog
+  /* 25 */ NB, // / (unimplemented monad)
+  /* 26 */ NB, // % (unimplemented monad)
+  /* 27 */ NB, // div (unimplemented monad)
 };
 
 static const BM VBD[VTZ]={
@@ -1563,8 +2053,11 @@ static const BM VBD[VTZ]={
   /* 22 */ NB, // root
   /* 23 */ NB, // log
   /* 24 */ NB, // readlog
+  /* 25 */ DB, // /
+  /* 26 */ DB, // %
+  /* 27 */ DB, // div
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -1746,8 +2239,10 @@ Q parse_b(C* s, D len, D base){
 // CClass(cc):0-nul,1-spc,2-alp,3-dig,4-dot,5-qot,6-bqt,7-ver,8-ctl,9-adv,10-oth,11-neg
 // Character class lookup table. Maps ASCII chars ' ' (32) to '~' (126) to a class index.
 //              !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~
-static C* CST="1757AA7988777B49333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
-D cl(C c){B uc=(B)c;if(!uc)return 0;if(uc>=128)return 4;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;}
+static C* CST="1757A77988777B47333333333378777A7222222222222222222222222228987A6222222222222222222222222228787";
+D cl(C c){
+  B uc=(B)c;if(!uc)return 0;if(uc>=128)return 4;if(uc<' '||uc>126)return 10;C r=CST[uc-' '];return(r>='0'&&r<='9')?r-'0':r-'A'+10;
+}
 D TT[9][12]={ // Transition Table
   // NUL SPC ALP DIG DOT QOT BQT VER CTL ADV OTH NEG
     {7,  0,  4,  2,  4,  5,  6,  7,  7,  7,  7,  1}, // 0 S_START
@@ -1758,14 +2253,71 @@ D TT[9][12]={ // Transition Table
     {7,  5,  5,  5,  5,  7,  5,  5,  5,  5,  5,  5}, // 5 S_STR
     {7,  7,  6,  6,  6,  7,  0,  7,  7,  7,  7,  7}, // 6 S_SYM
     {7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7}, // 7 S_DONE
-    {7,  8,  7,  2,  3,  7,  7,  7,  7,  7,  7,  7}, // 8 S_VEC
+    {7,  8,  7,  2,  3,  7,  7,  7,  7,  7,  7,  1}, // 8 S_VEC (allow negative elements after spaces)
   };
+static inline J parse_i10(const C* s, D len){
+  if(len<=0) return 0;
+  D i=0;
+  J sign=1;
+  if(s[0]=='-'){ sign=-1; i=1; }
+  Q r=0;
+  for(; i<len; i++){
+    C c=s[i];
+    if(c<'0' || c>'9') break;
+    r = r*10ULL + (Q)(c - '0');
+  }
+  return (J)r * sign;
+}
+static inline double parse_f10(const C* s, D len){
+  C tmp_small[128];
+  C* tmp = tmp_small;
+  if(len >= (D)sizeof(tmp_small)){
+    tmp = (C*)malloc((size_t)len + 1);
+    if(!tmp) return 0.0;
+  }
+  memcpy(tmp, s, (size_t)len);
+  tmp[len]=0;
+  errno = 0;
+  C* endp = 0;
+  double x = strtod(tmp, &endp);
+  if(tmp != tmp_small) free(tmp);
+  // The lexer guarantees a numeric-ish token, but keep this strict anyway.
+  if(errno || !endp || *endp) return 0.0;
+  return x;
+}
+static inline Q af(Q ar, double x){
+  Q q = tsna(ar, T_FLT, 0, 3, 1, 1);
+  pid(q, 0, f64_bits(x));
+  return q;
+}
 Q pn(C* s, D len){
-  D c=0;C* p=s;
-  while(*p){while(*p==' ')p++;if(!*p)break;c++;while(*p&&*p!=' ')p++;}
-  if(c==1){p=s;while(*p==' ')p++;C* t=p;while(*p&&*p!=' ')p++;return an(parse_b(t,p-t,10));} // TODO: arena awareness
-  Q z=vna(0,3,3,c);p=s;
-  for(D i=0;i<c;i++){while(*p==' ')p++;C* t=p;while(*p&&*p!=' ')p++;pid(z,i,parse_b(t,p-t,10));}
+  (void)len;
+  B is_flt=0;
+  for(C* p=s; *p; p++){ if(*p=='.') { is_flt=1; break; } }
+
+  D c=0; C* p=s;
+  while(*p){ while(*p==' ') p++; if(!*p) break; c++; while(*p && *p!=' ') p++; }
+
+  if(c==1){
+    p=s; while(*p==' ') p++; C* t0=p; while(*p && *p!=' ') p++; D l0=(D)(p-t0);
+    if(is_flt) return af(0, parse_f10(t0, l0));
+    return an(parse_i10(t0, l0));
+  }
+
+  if(is_flt){
+    Q z=vna(0, T_FLT, 3, c); p=s;
+    for(D i=0;i<c;i++){
+      while(*p==' ') p++; C* t0=p; while(*p && *p!=' ') p++; D l0=(D)(p-t0);
+      pid(z, i, f64_bits(parse_f10(t0, l0)));
+    }
+    return z;
+  }
+
+  Q z=vna(0, T_INT, 3, c); p=s;
+  for(D i=0;i<c;i++){
+    while(*p==' ') p++; C* t0=p; while(*p && *p!=' ') p++; D l0=(D)(p-t0);
+    pid(z, i, (Q)parse_i10(t0, l0));
+  }
   return z;
 }
 static inline B ends_with_dot_l(const char* s){
@@ -1848,6 +2400,24 @@ Q* lx_len(const C* b, D l){
       D ai=FA(t);
       if(ai){q[qi++]=aa(ai);p+=3;st=0;continue;}
     }
+
+    // Make '-' subtract when adjacent (e.g. "1-2" or "1- 2"), but keep negative literals in numeric vectors ("1 -2").
+    if(*p=='-'){
+      C next = (p+1<end) ? p[1] : 0;
+      if(next && ((next>='0' && next<='9') || next=='.')){
+        C prev = (p>b) ? p[-1] : 0;
+        B prev_can_end =
+          (prev>='0' && prev<='9') ||
+          (prev>='A' && prev<='Z') ||
+          (prev>='a' && prev<='z') ||
+          prev==')' || prev=='}' || prev=='\"' || prev=='`' || prev=='.';
+        if(prev_can_end){
+          q[qi++]=V('-');p++;st=0;continue;
+        }
+      }else{
+        q[qi++]=V('-');p++;st=0;continue;
+      }
+    }
     C*s=(C*)p;D cc=cl(*p);st=TT[0][cc]; // s:token start
     if(st==0){p++;continue;} // whitespace
     if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(FA(ts));p++;st=0;continue;} // verbs, controls, adverbs
@@ -1857,6 +2427,13 @@ Q* lx_len(const C* b, D l){
       if(st!=5 && (c=='\n' || c=='\r' || c=='\t' || c==';')) c=0; // token boundary at separators (except strings)
       cc=cl(c);
       D next_st=TT[st][cc];
+      // Disambiguate dyadic '-' written with spaces ("1 - 2") from a negative element in a numeric vector ("1 -2 3").
+      // If we're in a numeric vector and see '-' followed by whitespace/separator, end the current numeric token before '-'
+      // so the outer loop can re-lex '-' as a verb.
+      if(st==8 && c=='-' && next_st==1){
+        C la = (p+1<end) ? p[1] : 0;
+        if(!la || la==' ' || la=='\t' || la=='\n' || la=='\r' || la==';') next_st=7;
+      }
       if(st==1&&next_st!=2){q[qi++]=V(*s);p=s+1;st=0;break;} // not a number, treat '-' as a verb
       if(next_st==7){ // End of token.
         D len=(D)(p-s);

@@ -1,5 +1,7 @@
-// cl l.c /GL /O1 /Gy /MD /DNDEBUG /link /LTCG /OPT:REF /OPT:ICF
-// cc -fsanitize=address l.c -o l_lin
+// Build notes (canonical commands): see BUILDING.md
+// windows: cl l.c /GL /O1 /Gy /MD /DNDEBUG /link /LTCG /OPT:REF /OPT:ICF
+// linux_asan: cc -fsanitize=address l.c -o l_lin_asan
+// linux: cc -Os l.c -o l_lin
 #if defined(_MSC_VER)
   #define _CRT_SECURE_NO_WARNINGS
 #endif
@@ -290,11 +292,34 @@ Q ln(D n){return vna(0,0,3,n);}
 
 void pr(Q q);
 void zid(Q q,D i,Q d);
+
+static inline D pow2_ceil_u32(D x){
+  if(x<=1) return 1;
+  x--;
+  x |= x>>1;
+  x |= x>>2;
+  x |= x>>4;
+  x |= x>>8;
+  x |= x>>16;
+  return x+1;
+}
+
+static inline D dict_hash_cap_for_keys(D key_count){
+  // Keep load factor <= 0.75 and minimum size 64.
+  // need ~= ceil((key_count+1) / 0.75) => (4*(key_count+1))/3
+  Q want = (Q)key_count + 1ULL;
+  Q need = (4ULL*want + 2ULL) / 3ULL; // ceil(4*want/3)
+  if(need < 64ULL) need = 64ULL;
+  if(need > 0x7FFFFFFFULL) need = 0x7FFFFFFFULL; // keep in signed 32-bit range
+  D cap = pow2_ceil_u32((D)need);
+  if(cap < 64) cap = 64;
+  return cap;
+}
 Q dni(B t,B z,D n,Q ar){                                                              // alloc a dictionary of a certain type and element size with hash table capacity n. 
-  D c=cn(5,1,n);
-  Q h=vca(ar, 5, 2, c);                                                                   // n means keycount for hash.
-  Q k=lca(ar, c);
-  Q v=vca(ar, t, z, c);
+  D cap = dict_hash_cap_for_keys(n);
+  Q h=vca(ar, 5, 3, cap);                                                            // hash table (packed: fp32|idx32)
+  Q k=lca(ar, cap);                                                                  // key list
+  Q v=vca(ar, t, z, cap);                                                            // value list
   Q d=tsna(ar, 0, 2, 3, 3, 3);
   zid(d,0,h);zid(d,1,k);zid(d,2,v);
   return d;
@@ -399,29 +424,136 @@ static inline D lg2(D c){
   return __builtin_ctzll(c);
 #endif
 }
-#define HASH_CONST 0x9E3779B97F4A7C15ULL                                        // ~2^64/phi
-D hash(Q k,D lc){ return (k*HASH_CONST)>>(64-lc); }
-Q fk(D* ht,Q k,D c,Q keys){                                                     // hash goes from pointer to bucket but the hash needs to be based on structural equality. 
-  D mask = c - 1, i = hash(k,lg2(c)) & mask;
+static B match_struct(Q a, Q w, D depth);
+
+static inline Q mix64(Q x){
+  x += 0x9E3779B97F4A7C15ULL;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+  return x ^ (x >> 31);
+}
+static inline Q hash_bytes64(const void* data, Q bytes){
+  const B* p0 = (const B*)data;
+  Q h = 0xD6E8FEB86659FD93ULL ^ mix64(bytes);
+  for(Q i=0;i<bytes;i+=8){
+    Q chunk = 0;
+    Q rem = bytes - i;
+    if(rem > 8) rem = 8;
+    memcpy(&chunk, p0 + i, (size_t)rem);
+    h = mix64(h ^ mix64(chunk + i));
+  }
+  return h;
+}
+static inline Q atom_payload_for_hash(Q q){
+  if(ip(q)) return pi(q, 0);
+  B tq = t(q);
+  if(tq==2 || tq==18 || tq==34) return q>>6;
+  return di(q);
+}
+static Q qhash_struct(Q q, Q* stack, D depth){
+  if(!q) return 0;
+  if(depth > 1024) return 0x243F6A8885A308D3ULL;
+
+  if(ip(q)){
+    for(D i=0;i<depth && i<64;i++) if(stack[i]==q) return mix64(q);
+    if(depth < 64) stack[depth] = q;
+  }
+
+  B tq=t(q), sq=sh(q);
+  Q h = mix64(((Q)tq<<56) ^ ((Q)sq<<48) ^ ((Q)ls(q)<<40) ^ (Q)n(q));
+
+  if(sq==0){
+    return mix64(h ^ mix64(atom_payload_for_hash(q)));
+  }
+
+  // Structural dictionary: ignore internal hash table.
+  if(sq==2 && tq==0){
+    Q kq = pi(q, 1);
+    Q vq = pi(q, 2);
+    h = mix64(h ^ qhash_struct(kq, stack, depth+1));
+    h = mix64(h ^ qhash_struct(vq, stack, depth+1));
+    return h;
+  }
+
+  // Pointer lists and partial eval chains are structural.
+  if(tq==0 || tq==4){
+    D nq = n(q);
+    for(D i=0;i<nq;i++){
+      h = mix64(h ^ qhash_struct(pi(q,i), stack, depth+1));
+    }
+    return h;
+  }
+
+  // Homogeneous value vectors.
+  return mix64(h ^ hash_bytes64(p(q), (Q)n(q) * (Q)sz(q)));
+}
+static inline Q qhash64(Q q){
+  Q stack[64];
+  return qhash_struct(q, stack, 0);
+}
+static inline D bucket_from_hash(Q h, D lc){
+  return (D)(h >> (64 - lc));
+}
+
+static Q dict_rehash(Q d, D new_cap);
+static inline Q dict_ensure_ht(Q d, D want_keys){
+  if(!ip(d) || 2!=sh(d)) return ac(1);
+  Q htq = pi(d,0), kq = pi(d,1);
+  D key_n = n(kq);
+  if(want_keys < key_n) want_keys = key_n;
+
+  // Rebuild if counts drift (e.g., after load/clone) or if we'd exceed the load factor.
+  D used = (D)n(htq);
+  D cap  = (D)cp(htq);
+  D need = dict_hash_cap_for_keys(want_keys);
+
+  if(used != key_n || cap < need) return dict_rehash(d, need);
+  return d;
+}
+
+static inline D fp32_from_hash(Q h){
+  return (D)(h >> 32);
+}
+static inline D idx32_from_entry(Q entry){
+  return (D)(entry & 0xFFFFFFFFULL);
+}
+static inline D fp32_from_entry(Q entry){
+  return (D)(entry >> 32);
+}
+
+static inline D fk_h(Q* ht, Q k, Q h, D c, Q keys){
+  D mask = c - 1;
+  D fp = fp32_from_hash(h);
+  D i = bucket_from_hash(h, lg2(c)) & mask;
   for(D j=0; j<c; ++j){
-    D e = ht[i];
+    Q e = ht[i];
     if(!e) return i;                                                            // empty slot
-    if(pi(keys, e-1) == k) return i;                                            // key match
+    if(fp32_from_entry(e) == fp){
+      D idx1 = idx32_from_entry(e);
+      if(idx1 && match_struct(pi(keys, idx1-1), k, 0)) return i;                 // key match
+    }
     i = (i + 1) & mask;
   }
   return c;                                                                     // Sentinel for "table is full and key not found"
-} 
+}
+Q fk(Q* ht,Q k,D c,Q keys){                                                     // find slot for key in ht; uses structural hashing/equality
+  return fk_h(ht, k, qhash64(k), c, keys);
+}
 Q SC[1024]; D SP=0;Q G;
 Q NL[1024]; D LP=0;
 
 Q dki(Q d, Q k){                                                                // inner "dictionary key" lookup for a single dictionary
   if(!ip(d)||2!=sh(d)) return 0;                                                // Not a dictionary
+  Q ok = dict_ensure_ht(d, n(pi(d,1)));
+  if(34==t(ok)) return ok;
   Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
-  D* ht=(D*)p(htq); D c=cp(htq);
-  D i=fk(ht,k,c,kq);
+  Q* ht=(Q*)p(htq); D c=cp(htq);
+  Q h = qhash64(k);
+  D i=fk_h(ht,k,h,c,kq);
   if(i==c){return 0;}                                                           // Not found
-  D e=ht[i];
-  return e?qi(vq,e-1):0;                                                        // Found, or empty slot
+  Q e=ht[i];
+  D idx1 = idx32_from_entry(e);
+  return idx1?qi(vq,idx1-1):0;                                                   // Found, or empty slot
 }
 
 Q dk(Q d, Q k){                                                                 // outer "dictionary key" lookup with scope traversal
@@ -450,10 +582,7 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
 
   B s = sh(q);
   if(s==2){
-    Q htq=pi(q,0),kq=pi(q,1),vq=pi(q,2);
-
-    Q ht2 = tsna(dest_ar, 5, 1, ls(htq), n(htq), cp(htq));
-    memcpy(p(ht2), p(htq), (size_t)pz(ls(htq), (D)cp(htq)));
+    Q kq=pi(q,1),vq=pi(q,2);
 
     Q k2 = tsna(dest_ar, 0, 1, ls(kq), n(kq), cp(kq));
     for(D i=0;i<n(kq);i++){
@@ -476,9 +605,10 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
     }
 
     Q d2 = tsna(dest_ar, 0, 2, 3, 3, 3);
-    zid(d2, 0, ht2);
     zid(d2, 1, k2);
     zid(d2, 2, v2);
+    Q r = dict_rehash(d2, dict_hash_cap_for_keys(n(k2)));
+    if(34==t(r)) return r;
     return d2;
   }
 
@@ -501,13 +631,17 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
 
 Q dkv(Q d,Q k,Q v){
   Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
-  D* ht=(D*)p(htq);
+  Q ok = dict_ensure_ht(d, n(kq) + 1);
+  if(34==t(ok)) return ok;
+  htq=pi(d,0);kq=pi(d,1);vq=pi(d,2);
+  Q* ht=(Q*)p(htq);
   D c=cp(htq);
-  D i=fk(ht,k,c,kq);
+  Q h = qhash64(k);
+  D i=fk_h(ht,k,h,c,kq);
   if(i==c){return ac(6);}
-  D e=ht[i];
+  Q e=ht[i];
   if(e){                                                                      // overwrite existing value
-    D idx=e-1;
+    D idx=idx32_from_entry(e)-1;
     Q old=pi(vq, idx);
     ir(v);
     qid(vq, idx, v);
@@ -519,10 +653,35 @@ Q dkv(Q d,Q k,Q v){
   zid(kq, idx, k);                                                            // append key
   Q vq2 = xn(vq,1); if(34==t(vq2)) return vq2; if(vq2!=vq){ zid(d,2,vq2); vq=vq2; }
   qid(vq, idx, v);                                                            // append value
-  ht[i] = idx + 1;                                                            // write hash entry
+  ht[i] = ((Q)fp32_from_hash(h) << 32) | (Q)(idx + 1);                        // write hash entry (fp32|idx32+1)
   // Track number of active hash entries in the ht header (capacity remains fixed).
   ptr(htq)[4] = (Q)(n(htq) + 1);
   return v;
+}
+
+static Q dict_rehash(Q d, D new_cap){
+  if(!ip(d) || 2!=sh(d)) return ac(1);
+  Q kq = pi(d,1);
+  D key_n = n(kq);
+  D need = dict_hash_cap_for_keys(key_n);
+  if(new_cap < need) new_cap = need;
+  new_cap = pow2_ceil_u32(new_cap);
+  if(new_cap < 64) new_cap = 64;
+
+  Q ht_new = vca(obj_ar(d), 5, 3, new_cap);
+  Q* ht = (Q*)p(ht_new);
+
+  for(D idx=0; idx<key_n; ++idx){
+    Q key = pi(kq, idx);
+    Q h = qhash64(key);
+    D fp = fp32_from_hash(h);
+    D slot = (D)fk_h(ht, key, h, new_cap, kq);
+    if(slot == new_cap) return ac(6);
+    ht[slot] = ((Q)fp << 32) | (Q)(idx + 1);
+  }
+  ptr(ht_new)[4] = (Q)key_n;
+  zid(d, 0, ht_new);
+  return d;
 }
 Q parse_b(C* s, D len, D base);
 static void ft_refresh_dict(){
@@ -570,14 +729,13 @@ Q q2a_dict(Q dest_ar, Q q) {
     // A dictionary is a list of 3 pointers: hash, keys, values
     Q res = tsna(dest_ar, 0, 2, 3, 3, 3);
 
-    // Recursively materialize components
-    Q h = q2a(dest_ar, pi(q, 0));
     Q k = q2a(dest_ar, pi(q, 1));
     Q v = q2a(dest_ar, pi(q, 2));
-    if (AR_ID(dest_ar) == 2) { h = strip_fid(h); k = strip_fid(k); v = strip_fid(v); }
-    zid(res, 0, h); // hash
+    if (AR_ID(dest_ar) == 2) { k = strip_fid(k); v = strip_fid(v); }
     zid(res, 1, k); // keys
     zid(res, 2, v); // values
+    Q r = dict_rehash(res, dict_hash_cap_for_keys(n(k)));
+    if(34==t(r)) return r;
     return res;
 }
 
@@ -997,11 +1155,16 @@ Q dispatch(VF* Vtab, const BM* Btab, Q v, Q a, Q w);
 
 static inline Q vb_rebuild_dict(B A, Q d, Q new_vals){
   Q zd=dnu(0,3,0,A);
-  Q *hh=ptr(pi(d,0));Q hc=tsna(A,hh[0],hh[1],hh[2],hh[4],hh[5]);
-  memcpy(p(hc),p(pi(d,0)),(1ULL<<hh[2])*hh[4]);
-  Q *hk=ptr(pi(d,1));Q kc=tsna(A,hk[0],hk[1],hk[2],hk[4],hk[5]);
-  memcpy(p(kc),p(pi(d,1)),(1ULL<<hk[2])*hk[4]);
-  zid(zd,0,hc);zid(zd,1,kc);zid(zd,2,new_vals);
+  Q kq = pi(d,1);
+  Q *hk=ptr(kq);
+  Q kc=tsna(A,hk[0],hk[1],hk[2],hk[4],hk[5]);
+  memcpy(p(kc), p(kq), (size_t)sz(kq) * (size_t)n(kq));
+  for(D i=0;i<n(kc);i++) ir(pi(kc,i)); // preserve referenced key objects if any
+
+  zid(zd,1,kc);
+  zid(zd,2,new_vals);
+  Q r = dict_rehash(zd, dict_hash_cap_for_keys(n(kc)));
+  if(34==t(r)) return r;
   return zd;
 }
 
@@ -1140,6 +1303,53 @@ Q nd(B A,Q v,Q a,Q w){ return math(a,w,an_aa); }
 Q or(B A,Q v,Q a,Q w){ return math(a,w,or_aa); }
 Q xr(B A,Q v,Q a,Q w){ return math(a,w,xr_aa); }
 Q sb(B A,Q v,Q a,Q w){ return math(a,w,sb_aa); }
+
+static inline Q atom_payload_for_match(Q q){
+  if(ip(q)) return pi(q, 0);
+  B tq = t(q);
+  if(tq==2 || tq==18 || tq==34) return q>>6; // grammatical atoms store payload above bit 6
+  return di(q);
+}
+
+static B match_struct(Q a, Q w, D depth){
+  if(a==w) return 1;
+  if(!a || !w) return 0;
+  if(depth > 1024) return 0;
+
+  B ta=t(a), tw=t(w);
+  if(ta!=tw) return 0;
+  B sa=sh(a), sw=sh(w);
+  if(sa!=sw) return 0;
+
+  if(sa==0){
+    return atom_payload_for_match(a) == atom_payload_for_match(w);
+  }
+
+  if(ls(a)!=ls(w)) return 0;
+  D na=n(a), nw=n(w);
+  if(na!=nw) return 0;
+
+  // Dictionaries are structural: ignore internal hash table contents.
+  if(sa==2 && ta==0){
+    return match_struct(pi(a,1), pi(w,1), depth+1) && match_struct(pi(a,2), pi(w,2), depth+1);
+  }
+
+  // Pointer lists (and partial-eval sequences) compare recursively.
+  if(ta==0 || ta==4){
+    for(D i=0;i<na;i++){
+      if(!match_struct(pi(a,i), pi(w,i), depth+1)) return 0;
+    }
+    return 1;
+  }
+
+  // Homogeneous value vectors: compare bytes (ignores capacity).
+  return 0==memcmp(p(a), p(w), (size_t)na * (size_t)sz(a));
+}
+
+Q mt(B A,Q v,Q a,Q w){
+  (void)A; (void)v;
+  return an(match_struct(a, w, 0) ? 1 : 0);
+}
 
 Q bn(B A,Q v,Q a,Q w){ return math_m(w,bn_aa); }
 Q ng(B A,Q v,Q a,Q w){ return math_m(w,ng_aa); }
@@ -1295,7 +1505,8 @@ Q its(B A,Q v,Q a,Q w){
 
 Q lg(B A, Q v, Q a, Q w);
 Q rl(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,0,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0};
+Q mt(B A, Q v, Q a, Q w);
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0};
 VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl};
 
 static const BM VBM[VTZ]={
@@ -1482,9 +1693,21 @@ Q e(Q** q){
   if(34==t(a)){
     C c = (C)dc(a);
     if(';'==c){(*q)++; return tsna(0,4,1,3,0,0);}                                // terminator => missing
-    if('{'==c) return eoc(q);
+    if('{'==c){
+      Q noun = eoc(q);
+      Q w = **q;
+      B end = !w || (34==t(w) && (';'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+      if(!end && w && 2==t(w)) return edv(noun, q);                              // allow `{...}v w`
+      return noun;
+    }
+    if('('==c){
+      Q noun = eol(q);
+      Q w = **q;
+      B end = !w || (34==t(w) && (';'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+      if(!end && w && 2==t(w)) return edv(noun, q);                              // allow `(a;b)v w`
+      return noun;
+    }
     if('}'==c) return ecc(q);
-    if('('==c) return eol(q);
     if(')'==c) return ecl(q);
   }
 

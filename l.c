@@ -43,6 +43,15 @@ typedef Q(*VF)(B,Q,Q,Q);                                                        
 #define T_CHAR  6
 #define T_SYM   7
 #define T_FLT   8
+#define T_TAG   10
+
+// Symbol payload tagging (within the 60-bit immediate payload or 64-bit vector element):
+// - LSB==1 => interned symbol id (payload>>1 is the id/index into symtab)
+// - LSB==0 => "small" base62 symbol payload (payload>>1 is the base62 value; printing may be lossy for leading zeros)
+#define SYM_PAYLOAD_IS_INTERN(p) ((p) & 1ULL)
+#define SYM_PAYLOAD_VAL(p)       ((p) >> 1)
+#define SYM_PAYLOAD_INTERN(id)   ((((Q)(id)) << 1) | 1ULL)
+#define SYM_PAYLOAD_SMALL(v)     (((Q)(v)) << 1)
 
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
   #include <xmmintrin.h>
@@ -56,6 +65,7 @@ typedef Q(*VF)(B,Q,Q,Q);                                                        
 
 static inline Q f64_bits(double x){ Q b=0; memcpy(&b, &x, sizeof(b)); return b; }
 static inline double f64_from_bits(Q b){ double x=0; memcpy(&x, &b, sizeof(x)); return x; }
+static inline Q af_bits(Q ar, Q bits); // forward decl
 
 // Signed 60-bit immediate integers (type tag == 3). Other immediate tags use unsigned payloads.
 static inline Q di_int(Q q){
@@ -113,8 +123,9 @@ Q ap(Q v){return (v<<4)|4;}                                                   //
                                                                               // type 5 is hash
 Q ach(C c){return ((Q)(B)c<<4)|6;}                                            // create an atom of type 6 (char)
 Q as(Q s){return (s<<4)|7;}                                                   // create an atom of type 7 (symbol)
+Q atg(Q x){return (x<<4)|T_TAG;}                                              // create an atom of type 10 (tag64)
 Q aA(B a, D f){return (((Q)f<<8)|a)<<4|9;}                                    // create an atom of type 9 (arena/file)
-Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach(q):ac(q);} // encode data of an atom based on the type. TODO: handle 9
+Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach(q):7==t?as(q):8==t?af_bits(0,q):T_TAG==t?atg(q):ac(q);} // encode data of an atom based on the type. TODO: handle 9
 
 #define AR_ID(x) ((x)&0xFF)
 #define AR_FID(x) ((x)>>8)
@@ -464,6 +475,7 @@ Q ra(Q q){                                                                      
     case 6:  return ip(q) ? pi(q,0) : di(q);
     case 7:  return ip(q) ? pi(q,0) : di(q);
     case 8:  return ip(q) ? pi(q,0) : di(q);                                     // float payload bits (heap atoms only today)
+    case T_TAG: return ip(q) ? pi(q,0) : di(q);
     case 18: return ip(q) ? pi(q,0) : (q>>6);
     case 34: return ip(q) ? pi(q,0) : (q>>6);
     default: return ac(5);                                                      // not yet implemented
@@ -680,6 +692,9 @@ Q dki(Q d, Q k){                                                                
 }
 
 Q dk(Q d, Q k){                                                                 // outer "dictionary key" lookup with scope traversal
+  // References are grammatical name tokens. Environments store bindings under symbol keys,
+  // so resolve lookup keys by converting references to symbols.
+  if(1==t(k)) k = as(ra(k));
   Q r=dki(d,k);if(r){return r;}
   for (I j=SP; j>=0; j--) {                                                     // Search from the current scope (SP) down to scope 0
     Q r = dki(SC[j], k);
@@ -691,6 +706,9 @@ Q dk(Q d, Q k){                                                                 
 }
 
 static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth);
+
+static inline B is_nf(Q q){ return 34==t(q) && dc(q)==4; }
+static inline B is_fatal_clone_control(Q q){ return 34==t(q) && !is_nf(q); }
 
 static inline Q clone0_for_embed0(Q q, Q dest_ar, Q* stack, D depth){
   if(!ip(q) || t(q)!=0) return q;
@@ -711,7 +729,7 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
     for(D i=0;i<n(kq);i++){
       Q ki = pi(kq, i);
       Q kc = clone0_for_embed0(ki, dest_ar, stack, depth);
-      if(34==t(kc)) return kc;
+      if(is_fatal_clone_control(kc)) return kc;
       zid(k2, i, kc);
     }
 
@@ -720,7 +738,7 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
       for(D i=0;i<n(vq);i++){
         Q vi = pi(vq, i);
         Q vc = clone0_for_embed0(vi, dest_ar, stack, depth);
-        if(34==t(vc)) return vc;
+        if(is_fatal_clone_control(vc)) return vc;
         zid(v2, i, vc);
       }
     }else{
@@ -743,7 +761,7 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
     for(D i=0;i<nq;i++){
       Q ei = pi(q, i);
       Q ec = clone0_for_embed0(ei, dest_ar, stack, depth);
-      if(34==t(ec)) return ec;
+      if(is_fatal_clone_control(ec)) return ec;
       zid(r, i, ec);
     }
     return r;
@@ -807,15 +825,16 @@ static Q dict_rehash(Q d, D new_cap){
   return d;
 }
 Q parse_b(C* s, D len, D base);
+static inline Q sym_intern_bytes(const C* bytes, D len);
 static void ft_refresh_dict(){
   if(!G) return;
-  Q ft = dk(G, ar(parse_b("FT",2,62)));
+  Q ft = dk(G, sym_intern_bytes("FT", 2));
   if(34==t(ft)) return;
-  dkv(ft, ar(parse_b("addr",4,62)), FT_addr);
-  dkv(ft, ar(parse_b("sz",2,62)),   FT_sz);
-  dkv(ft, ar(parse_b("cap",3,62)),  FT_cap);
-  dkv(ft, ar(parse_b("h",1,62)),    FT_h);
-  dkv(ft, ar(parse_b("fn",2,62)),   FT_fn);
+  dkv(ft, sym_intern_bytes("addr", 4), FT_addr);
+  dkv(ft, sym_intern_bytes("sz",   2), FT_sz);
+  dkv(ft, sym_intern_bytes("cap",  3), FT_cap);
+  dkv(ft, sym_intern_bytes("h",    1), FT_h);
+  dkv(ft, sym_intern_bytes("fn",   2), FT_fn);
 }
 void ir(Q q){ if(ip(q)){ptr(q)[3]++;}return;}
 void dr(Q q){ 
@@ -897,7 +916,163 @@ Q q2a(Q dest_ar, Q q) {
     if (sh(q) == 1) return q2a_list(dest_ar, q);
     if (sh(q) == 2) return q2a_dict(dest_ar, q);
     return q;
-} 
+}
+
+// -----------------------------------------------------------------------------
+// Symbol interning
+//
+// Symbols (`name) are interned into a global table so:
+// - equality/hashing can use the symbol id payload
+// - printing can recover the original name
+// - users can inspect the symbol table via the exposed globals:
+//   - symtab: list of symbol names (id -> "name")
+//   - symmap: dict mapping "name" -> id
+// -----------------------------------------------------------------------------
+
+static Q SYM_TAB = 0;   // list of charvecs, in buddy arena; exposed as `symtab`
+static Q SYM_MAP = 0;   // dict: charvec -> int (id), in buddy arena; exposed as `symmap`
+static Q SYM_K_TAB = 0; // symbol key for global dict
+static Q SYM_K_MAP = 0;
+
+static inline Q qhash_charvec_bytes(const C* bytes, D len){
+  Q h0 = mix64(((Q)T_CHAR<<56) ^ ((Q)1<<48) ^ ((Q)0<<40) ^ (Q)len);
+  return mix64(h0 ^ hash_bytes64(bytes, (Q)len));
+}
+
+static inline int tag64_digit(C c){
+  if(c=='_') return 0;
+  if(c>='A' && c<='Z') return 1 + (c - 'A');
+  if(c>='a' && c<='z') return 27 + (c - 'a');
+  if(c>='0' && c<='9') return 53 + (c - '0');
+  if(c=='.') return 63;
+  return -1;
+}
+
+static const Q TAG64_ERR = ~0ULL;
+
+static inline Q tag64_parse_payload(const C* s, D len){
+  // No stored length: leading '_' digits are treated as leading zeros and thus are not round-trippable.
+  if(!s || len < 0) return TAG64_ERR;
+  if(len > 10) return TAG64_ERR; // >60 bits
+  Q v=0;
+  for(D i=0;i<len;i++){
+    int d = tag64_digit(s[i]);
+    if(d < 0) return TAG64_ERR;
+    v = (v << 6) | (Q)(D)d;
+  }
+  return v;
+}
+
+static B symmap_lookup_id(Q symmap, const C* bytes, D len, D* out_id){
+  if(!out_id) return 0;
+  if(!symmap || !ip(symmap) || sh(symmap)!=2) return 0;
+  Q ok = dict_ensure_ht(symmap, n(pi(symmap,1)));
+  if(34==t(ok)) return 0;
+
+  Q htq=pi(symmap,0), kq=pi(symmap,1), vq=pi(symmap,2);
+  Q* ht=(Q*)p(htq);
+  D c=cp(htq);
+  if(!c) return 0;
+  D mask = c - 1;
+
+  Q h = qhash_charvec_bytes(bytes, len);
+  D fp = fp32_from_hash(h);
+  D i = bucket_from_hash(h, lg2(c)) & mask;
+  for(D j=0; j<c; ++j){
+    Q e = ht[i];
+    if(!e) return 0;
+    if(fp32_from_entry(e) == fp){
+      D idx1 = idx32_from_entry(e);
+      if(idx1){
+        Q key = pi(kq, idx1-1);
+        if(t(key)==T_CHAR && sh(key)==1 && n(key)==len && 0==memcmp(p(key), bytes, (size_t)len)){
+          Q val = pi(vq, idx1-1);
+          if(t(val)!=T_INT || sh(val)!=0) return 0;
+          J idj = (J)ra(val);
+          if(idj < 0 || idj > 0x7FFFFFFF) return 0;
+          *out_id = (D)idj;
+          return 1;
+        }
+      }
+    }
+    i = (i + 1) & mask;
+  }
+  return 0;
+}
+
+static void sym_init(void){
+  if(SYM_TAB && SYM_MAP) return;
+  if(!G) return;
+
+  if(!SYM_TAB){
+    SYM_TAB = lca(1, 64);
+  }
+  if(!SYM_MAP){
+    // Values are pointer-list ints (an(id)) so dkv's ir/dr remains safe.
+    SYM_MAP = dni(0, 3, 0, 1);
+  }
+
+  // Bootstrap the interned ids for the exposed globals "symtab" and "symmap" without
+  // recursing back into sym_intern_bytes(). These keys must be interned so that
+  // identifier references (which are interned at lex time) can resolve them.
+  D id_tab=0, id_map=0;
+  if(!symmap_lookup_id(SYM_MAP, "symtab", 6, &id_tab)){
+    Q name = tsna_u(1, T_CHAR, 1, 0, 6, 6);
+    memcpy(p(name), "symtab", 6);
+    D idx = n(SYM_TAB);
+    Q tab2 = xn(SYM_TAB, 1);
+    if(34!=t(tab2)){
+      if(tab2!=SYM_TAB) SYM_TAB = tab2;
+      zid(SYM_TAB, idx, name);
+      dkv(SYM_MAP, name, an((J)idx));
+      id_tab = idx;
+    }
+  }
+  if(!symmap_lookup_id(SYM_MAP, "symmap", 6, &id_map)){
+    Q name = tsna_u(1, T_CHAR, 1, 0, 6, 6);
+    memcpy(p(name), "symmap", 6);
+    D idx = n(SYM_TAB);
+    Q tab2 = xn(SYM_TAB, 1);
+    if(34!=t(tab2)){
+      if(tab2!=SYM_TAB) SYM_TAB = tab2;
+      zid(SYM_TAB, idx, name);
+      dkv(SYM_MAP, name, an((J)idx));
+      id_map = idx;
+    }
+  }
+
+  SYM_K_TAB = as(SYM_PAYLOAD_INTERN(id_tab));
+  SYM_K_MAP = as(SYM_PAYLOAD_INTERN(id_map));
+  dkv(G, SYM_K_TAB, SYM_TAB);
+  dkv(G, SYM_K_MAP, SYM_MAP);
+}
+
+static inline Q sym_intern_bytes(const C* bytes, D len){
+  sym_init();
+  if(!SYM_TAB || !SYM_MAP) return as(SYM_PAYLOAD_SMALL(parse_b((C*)bytes, len, 62))); // fallback
+
+  D id=0;
+  if(symmap_lookup_id(SYM_MAP, bytes, len, &id)){
+    return as(SYM_PAYLOAD_INTERN(id));
+  }
+
+  // Allocate name string (buddy) and append to symtab.
+  Q name = tsna_u(1, T_CHAR, 1, 0, len, len ? len : 1);
+  if(len) memcpy(p(name), bytes, (size_t)len);
+
+  D idx = n(SYM_TAB);
+  Q tab2 = xn(SYM_TAB, 1);
+  if(34==t(tab2)) return tab2;
+  if(tab2 != SYM_TAB){
+    SYM_TAB = tab2;
+    dkv(G, SYM_K_TAB, SYM_TAB);
+  }
+  zid(SYM_TAB, idx, name);
+
+  // Insert into map (name -> id).
+  dkv(SYM_MAP, name, an((J)idx));
+  return as(SYM_PAYLOAD_INTERN(idx));
+}
 
 
 void* os_map(char* fn, Q* sz, Q* h_out){
@@ -1276,6 +1451,49 @@ C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 void pr_b(Q q,D b){if(q<b){printf("%c",MAP[q]);return;}pr_b(q/b,b);printf("%c",MAP[q%b]);}
 
+static void pr_sym_payload(Q idq){
+  Q payload = idq;
+  if(SYM_PAYLOAD_IS_INTERN(payload)){
+    D id = (D)SYM_PAYLOAD_VAL(payload);
+    if(SYM_TAB && ip(SYM_TAB) && sh(SYM_TAB)==1 && id < n(SYM_TAB)){
+      Q name = pi(SYM_TAB, id);
+      if(t(name)==T_CHAR && sh(name)==1){
+        fwrite(p(name), 1, (size_t)n(name), stdout);
+        return;
+      }
+    }
+  }else{
+    pr_b(SYM_PAYLOAD_VAL(payload), 62);
+    return;
+  }
+  pr_b(payload, 62);
+}
+
+// Tag64 printing: `$` prefix + base64 digits (alphabet is: _ A-Z a-z 0-9 .)
+static inline C tag64_digit_char(D v){
+  if(v==0) return '_';
+  if(v>=1 && v<=26) return (C)('A' + (v-1));
+  if(v>=27 && v<=52) return (C)('a' + (v-27));
+  if(v>=53 && v<=62) return (C)('0' + (v-53));
+  return '.';
+}
+
+static void pr_tag64_payload(Q payload){
+  // Canonical minimal digit form; leading '_' digits (zeros) are omitted. payload==0 prints as just "$".
+  printf("$");
+  if(payload==0) return;
+  C buf[16];
+  D nbuf=0;
+  while(payload && nbuf < (D)sizeof(buf)){
+    D d = (D)(payload & 63ULL);
+    buf[nbuf++] = tag64_digit_char(d);
+    payload >>= 6;
+  }
+  for(D i=0;i<nbuf;i++){
+    putchar(buf[nbuf-1-i]);
+  }
+}
+
 static inline void pr_f64(double x){
   if(isnan(x)){ printf("nan"); return; }
   if(isinf(x)){ printf("%sinf", x<0 ? "-" : ""); return; }
@@ -1307,7 +1525,7 @@ void pr(Q q){
       }
     }
   }
-  if(1==t(q)){pr_b(ip(q)?pi(q,0):di(q),62);}
+  if(1==t(q)){pr_sym_payload(ip(q)?pi(q,0):di(q));}
   if(2==t(q)){
     Q v=q;
     D advs[32];D nadv=0;
@@ -1324,7 +1542,14 @@ void pr(Q q){
     }
   }
   if(18==t(q)){printf("%s",AT[da(q)]);}
-  if(34==t(q)){printf("control: %c\n",(char)dc(q));}
+  if(34==t(q)){
+    Q code = dc(q);
+    if(code==2){ printf("qi"); return; }                                         // generic error
+    if(code==4){ printf("nf"); return; }                                         // not found
+    if(code>=32 && code<=126){ printf("control:%c",(char)code); return; }
+    printf("control:%llu",(unsigned long long)code);
+    return;
+  }
   if(9==t(q)){printf("file:%d", (int)AR_FID(di(q)));}
   if(6==t(q)){
     if(0==sh(q)){printf("\"%c\"",(char)(ip(q)?pi(q,0):di(q)));}
@@ -1344,9 +1569,34 @@ void pr(Q q){
       }
     }
   }
+  if(T_TAG==t(q)){
+    if(0==sh(q)){ pr_tag64_payload(ip(q)?pi(q,0):di(q)); }
+    if(1==sh(q)){
+      D nq=n(q);
+      for(D i=0;i<nq;i++){
+        if(i) printf(" ");
+        pr_tag64_payload(pi(q,i));
+      }
+    }
+  }
   if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
   if(5==t(q)){printf("hash table: ");for(D i=0;i<cp(q);i++){printf("%d:%lld ",i,pi(q,i));}printf("\n");}
-  if(7==t(q)){printf("`");pr_b(ip(q)?pi(q,0):di(q),62);}
+  if(7==t(q)){
+    // Interned symbol printing: show original bytes if present in symtab, else base62 payload.
+    if(sh(q)==0){
+      printf("`");
+      pr_sym_payload(ip(q)?pi(q,0):di(q));
+    }else if(sh(q)==1){
+      D nq=n(q);
+      for(D i=0;i<nq;i++){
+        if(i) printf(" ");
+        printf("`");
+        pr_sym_payload(pi(q,i));
+      }
+    }else{
+      printf("`");pr_b(ip(q)?pi(q,0):di(q),62);
+    }
+  }
 }
 VF VD[VTZ];
 VF VM[VTZ];
@@ -2069,6 +2319,27 @@ Q tl(B A,Q v,Q a,Q w){
 }
 
 Q at(B A,Q v,Q a,Q w){
+  // Dictionary lookup: d@k
+  if(ip(a) && t(a)==0 && sh(a)==2){
+    if(ii(w)){
+      Q r = dki(a, w);
+      if(34==t(r)) return r;
+      return r ? r : ac(4);
+    }
+    if(sh(w)==1){
+      D nw=n(w);
+      Q z = ln(nw);
+      for(D i=0;i<nw;i++){
+        Q ki = qi(w, i);
+        Q r = dki(a, ki);
+        if(34==t(r)) return r;
+        zid(z, i, r ? r : ac(4));
+      }
+      return z;
+    }
+    return ac(1);
+  }
+
   B aa=ii(a),aw=ii(w);B nz=n(w);
   if(aw){return aa?a:qi(a,ra(w));} // TODO: arena awareness
   Q z=vna(0,t(a),ls(a),nz);
@@ -2170,6 +2441,8 @@ Q ng(B A,Q v,Q a,Q w){
 }
 
 Q set(Q a,Q w,D sp){
+  // Store bindings under symbol keys (not reference keys).
+  if(1==t(a)) a = as(ra(a));
   Q d = SC[sp];
   if(ip(w) && 0==t(w)){
     // Preserve identity for open-scope/list builders so later input continues mutating the same object.
@@ -2369,7 +2642,7 @@ static const BM VBD[VTZ]={
   /*  0 */ NB,
   /*  1 */ NB, // ~
   /*  2 */ NB, // !
-  /*  3 */ RB, // @
+  /*  3 */ NB, // @ (handled explicitly in at(); do not implicitly lift boxed keys/indices)
   /*  4 */ NB, // #
   /*  5 */ DB, // +
   /*  6 */ DB, // *
@@ -2751,6 +3024,11 @@ static inline Q af(Q ar, double x){
   pid(q, 0, f64_bits(x));
   return q;
 }
+static inline Q af_bits(Q ar, Q bits){
+  Q q = tsna(ar, T_FLT, 0, 3, 1, 1);
+  pid(q, 0, bits);
+  return q;
+}
 Q pn(C* s, D len){
   (void)len;
   B is_flt=0;
@@ -2820,11 +3098,40 @@ static inline D ascii_adv_id(const C* p){
 
 Q* lx_len(const C* b, D l);
 
+static inline B env_truthy(const char* v){
+  if(!v || !*v) return 0;
+  if(v[0]=='0') return 0;
+  if(v[0]=='1') return 1;
+  if(v[0]=='y' || v[0]=='Y') return 1;
+  if(v[0]=='t' || v[0]=='T') return 1;
+  return 0;
+}
+static inline B env_flag_on(const char* name){
+  const char* v = getenv(name);
+  return env_truthy(v);
+}
+static void dump_token_tape(Q* toks){
+  if(!toks) return;
+  for(D i=0; toks[i]; ++i){
+    Q x = toks[i];
+    printf("tok[%u] t=%u sh=%u ", (unsigned)i, (unsigned)t(x), (unsigned)sh(x));
+    pr(x);
+    printf("\n");
+  }
+}
+static inline B dump_tokens_enabled(void){
+  static B init = 0;
+  static B on = 0;
+  if(!init){ on = env_flag_on("L_DUMP_TOKENS"); init = 1; }
+  return on;
+}
+
 static Q eval_code_tape(const C* src, D len){
   if(!src || !len) return 0;
   if(len >= 3 && (B)src[0]==0xEF && (B)src[1]==0xBB && (B)src[2]==0xBF){ src += 3; len -= 3; } // skip UTF-8 BOM
   Q* tokens_base = lx_len(src, len);
   if(!tokens_base) return ac(2);
+  if(dump_tokens_enabled()) dump_token_tape(tokens_base);
   Q* tokens = tokens_base;
   Q r = E(&tokens, '\0');
   os_heap_free(tokens_base);
@@ -2854,6 +3161,132 @@ Q* lx_len(const C* b, D l){
     if(*p=='\r'){q[qi++]=ac('\n');p++;if(p<end && *p=='\n')p++;st=0;continue;}
     if(*p==';'){q[qi++]=ac(';');p++;st=0;continue;}
     if(*p=='\t'){p++;continue;}
+
+    // Tag literal: `$...` (tag64). Uses '$' as a delimiter like '`' for symbols.
+    // Allowed digits: _ A-Z a-z 0-9 .  (max 10 digits => 60 bits)
+    // Vector literal: multiple tag literals (e.g. "$a$b" or "$a $b $c") lex as a single T_TAG vector (like "1 2 3").
+    if(*p=='$'){
+      Q tmp[32]; Q* vals = tmp; D nvals = 0, cap = (D)(sizeof(tmp)/sizeof(tmp[0]));
+      Q scalar_payload = 0; B scalar_ok = 0;
+      B err = 0;
+      for(;;){
+        const C* s = p;
+        p++; // '$'
+        while(p<end && tag64_digit(*p) >= 0) p++;
+
+        D len_tok = (D)(p - s);
+        Q payload = tag64_parse_payload(s+1, len_tok-1);
+        if(payload==TAG64_ERR){
+          err = 1;
+          break;
+        }
+
+        if(nvals==0){ scalar_payload = payload; scalar_ok = 1; }
+        if(nvals < cap){
+          vals[nvals++] = payload;
+        }else{
+          D new_cap = cap + (cap>>1) + 8;
+          Q* nv = (Q*)os_heap_alloc((Q)(new_cap * (D)sizeof(Q)));
+          if(!nv){
+            err = 1;
+            break;
+          }
+          memcpy(nv, vals, (size_t)(cap * (D)sizeof(Q)));
+          if(vals!=tmp) os_heap_free(vals);
+          vals = nv;
+          cap = new_cap;
+          vals[nvals++] = payload;
+        }
+
+        // Next element?
+        if(p<end && *p=='$') continue;
+        const C* p2 = p;
+        while(p2<end && (*p2==' ' || *p2=='\t')) p2++;
+        if(p2<end && *p2=='$'){ p = p2; continue; }
+        break;
+      }
+
+      if(err){
+        if(vals!=tmp) os_heap_free(vals);
+        q[qi++]=ac(2);
+        st=0;continue;
+      }
+
+      if(nvals<=1 && scalar_ok){
+        if(vals!=tmp) os_heap_free(vals);
+        q[qi++] = atg(scalar_payload);
+      }else{
+        Q z = vna(0, T_TAG, 3, nvals);
+        for(D i=0;i<nvals;i++) pid(z, i, vals[i]);
+        if(vals!=tmp) os_heap_free(vals);
+        q[qi++] = z;
+      }
+      st=0;continue;
+    }
+
+    // Symbol literal: '`name' (interned). Vector literal: `a`b`c (or `a `b `c) lex as a single T_SYM vector.
+    if(*p=='`'){
+      Q tmp[32]; Q* vals = tmp; D nvals = 0, cap = (D)(sizeof(tmp)/sizeof(tmp[0]));
+      Q scalar_atom = 0; B scalar_ok = 0;
+      Q errtok = 0;
+      for(;;){
+        p++; // '`'
+        const C* s = p;
+        while(p<end){
+          C c=*p;
+          if((c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='.'||c=='_'){ p++; continue; }
+          break;
+        }
+        D len_tok = (D)(p - s);
+        Q atom = sym_intern_bytes(s, len_tok);
+        if(t(atom)==34){
+          errtok = atom;
+          break;
+        }
+        if(nvals==0){ scalar_atom = atom; scalar_ok = 1; }
+        Q payload = ip(atom) ? pi(atom,0) : di(atom);
+
+        if(nvals < cap){
+          vals[nvals++] = payload;
+        }else{
+          D new_cap = cap + (cap>>1) + 8;
+          Q* nv = (Q*)os_heap_alloc((Q)(new_cap * (D)sizeof(Q)));
+          if(!nv){
+            errtok = ac(2);
+            break;
+          }
+          memcpy(nv, vals, (size_t)(cap * (D)sizeof(Q)));
+          if(vals!=tmp) os_heap_free(vals);
+          vals = nv;
+          cap = new_cap;
+          vals[nvals++] = payload;
+        }
+
+        // Next element?
+        if(p<end && *p=='`') continue;
+        const C* p2 = p;
+        while(p2<end && (*p2==' ' || *p2=='\t')) p2++;
+        if(p2<end && *p2=='`'){ p = p2; continue; }
+        break;
+      }
+
+      if(errtok){
+        if(vals!=tmp) os_heap_free(vals);
+        q[qi++] = errtok;
+        st=0;continue;
+      }
+
+      if(nvals<=1 && scalar_ok){
+        if(vals!=tmp) os_heap_free(vals);
+        q[qi++] = scalar_atom;
+      }else{
+        Q z = vna(0, T_SYM, 3, nvals);
+        for(D i=0;i<nvals;i++) pid(z, i, vals[i]);
+        if(vals!=tmp) os_heap_free(vals);
+        q[qi++] = z;
+      }
+      st=0;continue;
+    }
 
     if((end-p)>=2){
       D ai2=ascii_adv_id(p);
@@ -2886,6 +3319,10 @@ Q* lx_len(const C* b, D l){
     C*s=(C*)p;D cc=cl(*p);st=TT[0][cc]; // s:token start
     if(st==0){p++;continue;} // whitespace
     if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(FA(ts));p++;st=0;continue;} // verbs, controls, adverbs
+    if(st==7){
+      if(cc==0){st=7;break;} // embedded NUL: treat as end-of-input
+      q[qi++]=ac(2);p++;st=0;continue; // unknown/illegal char
+    }
     while(st!=7){
       p++;
       C c = (p<end) ? *p : 0;
@@ -2903,22 +3340,26 @@ Q* lx_len(const C* b, D l){
       if(next_st==7){ // End of token.
         D len=(D)(p-s);
         if(st==1||st==2||st==3||st==8 || st==4){
-          C tmp_small[100];C* t=tmp_small;
+          C tmp_small[100];C* tok=tmp_small;
           if(len >= (D)sizeof(tmp_small)){
-            t=(C*)os_heap_alloc((Q)len + 1ULL);
-            if(!t){q[qi]=0;return q;}
+            tok=(C*)os_heap_alloc((Q)len + 1ULL);
+            if(!tok){q[qi]=0;return q;}
           }
-          memcpy(t,s,(size_t)len);t[len]=0;
-          if(st==1||st==2||st==3||st==8) q[qi++]=pn(t,len);
+          memcpy(tok,s,(size_t)len);tok[len]=0;
+          if(st==1||st==2||st==3||st==8) q[qi++]=pn(tok,len);
           else { // st==4 name
-            D vi=FV(t);
-            D ai=FA(t);
+            D vi=FV(tok);
+            D ai=FA(tok);
             if(vi) q[qi++]=av(vi); else if(ai) q[qi++]=aa(ai);
-            else q[qi++]=ar(parse_b(t,len,62));
+            else {
+              Q sym = sym_intern_bytes(tok, len);
+              if(34==t(sym)) q[qi++]=sym;
+              else q[qi++]=ar(ra(sym)); // reference payload is the symbol payload (interned or small)
+            }
           }
-          if(t!=tmp_small) os_heap_free(t);
+          if(tok!=tmp_small) os_heap_free(tok);
         }
-        else if(st==6){ q[qi++]=as(parse_b(s+1,len-1,62));}
+        else if(st==6){ q[qi++]=sym_intern_bytes(s+1, len-1); }
         else if(st==5){ s++; len--; Q z=vna(0,6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z; if(p<end)p++;}
         // TODO: S_FLT
         st=0;break;
@@ -2996,13 +3437,14 @@ I main(I argc, C** argv){
   FT_h    = vca(1, 3, 3, 4096);
   FT_fn   = vca(1, 0, 3, 4096);
   G=dni(0,3,0,1); // global dictionary in buddy allocator
+  sym_init();
   Q ft = dni(0,3,0,1); // file table dict in buddy allocator
-  dkv(ft, ar(parse_b("addr",4,62)), FT_addr);
-  dkv(ft, ar(parse_b("sz",2,62)),   FT_sz);
-  dkv(ft, ar(parse_b("cap",3,62)),  FT_cap);
-  dkv(ft, ar(parse_b("h",1,62)),    FT_h);
-  dkv(ft, ar(parse_b("fn",2,62)),   FT_fn);
-  dkv(G, ar(parse_b("FT",2,62)),    ft);
+  dkv(ft, sym_intern_bytes("addr", 4), FT_addr);
+  dkv(ft, sym_intern_bytes("sz",   2), FT_sz);
+  dkv(ft, sym_intern_bytes("cap",  3), FT_cap);
+  dkv(ft, sym_intern_bytes("h",    1), FT_h);
+  dkv(ft, sym_intern_bytes("fn",   2), FT_fn);
+  dkv(G,  sym_intern_bytes("FT",   2), ft);
   SC[0]=dni(0,3,0,0); SP=0;
 
   if(argc > 1){

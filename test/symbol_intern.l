@@ -4,7 +4,7 @@ d:{a:1}
 t0: 1~d@`a
 
 a:1
-ids:symmap@("a")
+ids:symmap@,"a"
 id:ids@0
 t1: "a"~symtab@id
 t2: 1~a

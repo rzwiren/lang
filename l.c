@@ -685,6 +685,8 @@ C LC[1024];
 B LK[1024];
 // For LK==1 (postfix index), the base value being indexed (kept alive across unbalanced input).
 Q LBASE[1024];
+// For LK==0 (list literal), track whether any list separators (';' or '\n') occurred while building.
+B LSEP[1024];
 
 Q dki(Q d, Q k){                                                                // inner "dictionary key" lookup for a single dictionary
   if(!ip(d)||2!=sh(d)) return 0;                                                // Not a dictionary
@@ -1767,7 +1769,28 @@ VF VM[VTZ];
 extern VF AV[ATZ];
 
 Q id(B A,Q v,Q a,Q w){return w;}
-Q en(B A,Q v,Q a,Q w){B aw=ii(w);Q z=vna(0,aw?t(w):0,ls(w),1);if(aw){pid(z,0,di(w));}else{zid(z,0,w);};return z;}
+Q en(B A,Q v,Q a,Q w){
+  (void)A; (void)v; (void)a;
+
+  // Enlist:
+  // - atoms => homogeneous vector of that atom type (shape 1)
+  // - non-atoms => pointer list (type 0) containing the object
+  if(ii(w) || (ip(w) && sh(w)==0)){
+    B tw = t(w);
+    if(tw==T_CHAR){
+      Q z = vna(0, T_CHAR, 0, 1);
+      pid(z, 0, ra(w));
+      return z;
+    }
+    Q z = vna(0, tw, ls(w), 1);
+    pid(z, 0, ra(w));
+    return z;
+  }
+
+  Q z = vna(0, 0, 3, 1);
+  zid(z, 0, w);
+  return z;
+}
 Q tp(B A,Q v,Q a,Q w){return an(t(w));}
 Q ct(B A,Q v,Q a,Q w){return an(n(w));}
 
@@ -3157,6 +3180,7 @@ Q eol(Q** q){
   LC[LP] = ')';
   LK[LP] = 0;
   LBASE[LP] = 0;
+  LSEP[LP] = 0;
   (void)E(q,')',1);                                                            // Evaluate until ')' or end-of-stream, appending values.
   if(**q && 34==t(**q) && ')'==dc(**q)){                                       // If ')' is present, consume it and close the list.
     return ecl(q);
@@ -3180,6 +3204,7 @@ Q eib(Q base, Q** q){
   LC[LP] = ']';
   LK[LP] = 1;
   LBASE[LP] = base; ir(base);
+  LSEP[LP] = 0;
   (void)E(q,']',1);                                                            // Evaluate until ']' or end-of-stream, appending indices.
   if(**q && 34==t(**q) && ']'==dc(**q)){
     return ecl(q);                                                             // close + apply index
@@ -3200,13 +3225,20 @@ Q ecl(Q** q){
   Q l = NL[LP];
   B kind = LK[LP];
   Q base = LBASE[LP];
+  B saw_sep = LSEP[LP];
 
   LC[LP] = 0;
   LK[LP] = 0;
   LBASE[LP] = 0;
+  LSEP[LP] = 0;
   LP--;
 
-  if(kind==0) return l;
+  if(kind==0){
+    // Delistify: treat `(expr)` as grouping if it contains no list separators on this line.
+    // Singleton lists can still be created via enlist: `,expr`.
+    if(close_tc==')' && !saw_sep && n(l)==1) return pi(l, 0);
+    return l;
+  }
   Q r = apply_brackets(base, l);
   dr(base);
   return r;
@@ -3437,7 +3469,11 @@ Q E(Q** q, C tc, B capture){
     Q a = **q;
     if(!a) break;
     if(tc && 34==t(a) && tc==dc(a)) break;
-    if(34==t(a) && (';'==dc(a) || '\n'==dc(a))){(*q)++; continue;}                // ignore empty statements
+    if(34==t(a) && (';'==dc(a) || '\n'==dc(a))){
+      if(capture && LP>0 && LK[LP]==0) LSEP[LP]=1;
+      (*q)++;
+      continue;
+    }                                                                              // ignore empty statements
     r=e(q);                                                                        // e() consumes exactly one expression
     if(capture && !(4==t(r) && 0==n(r))){                                          // capture (skip "missing")
       Q v = r;
@@ -3454,6 +3490,7 @@ Q E(Q** q, C tc, B capture){
     }
     if(**q && 34==t(**q) && (';'==dc(**q) || '\n'==dc(**q))){                      // consume statement terminator if present
       C sep = (C)dc(**q);
+      if(capture && LP>0 && LK[LP]==0) LSEP[LP]=1;
       (*q)++;
       if(sep==';') r = missing;                                                   // trailing ';' suppresses the statement result
     }
@@ -3504,9 +3541,9 @@ Q e(Q** q){
       Q noun = eif(q);
       if(34==t(noun)) return noun;
       while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);          // postfix indexing
-
+ 
       Q v = **q;
-      Q w2 = (*q)[1];
+      Q w2 = v ? (*q)[1] : 0;
       B end2 = !w2 || (34==t(w2) && (';'==dc(w2) || '\n'==dc(w2) || '}'==dc(w2) || ')'==dc(w2) || ']'==dc(w2)));
       if(v && 2==t(v) && !end2) return edv(noun, q);
       return noun;
@@ -3524,9 +3561,9 @@ Q e(Q** q){
   (*q)++;                                                                        // consume noun/reference
   Q noun = (1==t(a)) ? dk(SC[SP], a) : a;
   while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);              // postfix indexing
-
+ 
   Q v = **q;
-  Q w2 = (*q)[1];
+  Q w2 = v ? (*q)[1] : 0;
   B end2 = !w2 || (34==t(w2) && (';'==dc(w2) || '\n'==dc(w2) || '}'==dc(w2) || ')'==dc(w2) || ']'==dc(w2)));
   if(v && 2==t(v) && !end2) return edv(noun, q);                                 // dyadic (after postfix indexing)
   return noun;
@@ -3691,6 +3728,21 @@ static inline B env_flag_on(const char* name){
   const char* v = getenv(name);
   return env_truthy(v);
 }
+
+static inline void dbg_write_startup(const char* s){
+  static B init = 0;
+  static B on = 0;
+  if(!init){ on = env_flag_on("L_DBG_STARTUP"); init = 1; }
+  if(!on || !s) return;
+#if defined(_WIN32)
+  HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+  if(!h || h==INVALID_HANDLE_VALUE) return;
+  DWORD wrote = 0;
+  WriteFile(h, s, (DWORD)strlen(s), &wrote, NULL);
+#else
+  (void)write(2, s, strlen(s));
+#endif
+}
 static void dump_token_tape(Q* toks){
   if(!toks) return;
   for(D i=0; toks[i]; ++i){
@@ -3709,8 +3761,10 @@ static inline B dump_tokens_enabled(void){
 
 static Q eval_code_tape(const C* src, D len){
   if(!src || !len) return 0;
+  dbg_write_startup("dbg: eval_code_tape enter\n");
   if(len >= 3 && (B)src[0]==0xEF && (B)src[1]==0xBB && (B)src[2]==0xBF){ src += 3; len -= 3; } // skip UTF-8 BOM
   Q* tokens_base = lx_len(src, len);
+  dbg_write_startup("dbg: eval_code_tape lexed\n");
   if(!tokens_base) return ac(2);
   if(dump_tokens_enabled()) dump_token_tape(tokens_base);
   Q* tokens = tokens_base;
@@ -3742,8 +3796,11 @@ static Q eval_code_file(const char* fn){
   Q sz=0, h=0;
   void* addr = os_map_ro((char*)fn, &sz, &h);
   if(!addr) { printf("load: map failed: %s\n", fn); return ac(2); }
+  dbg_write_startup("dbg: eval_code_file mapped\n");
   Q r = (addr==(void*)1) ? 0 : eval_code_tape((const C*)addr, (D)sz);
+  dbg_write_startup("dbg: eval_code_file tape done\n");
   os_unmap_ro(addr, sz, h);
+  dbg_write_startup("dbg: eval_code_file unmapped\n");
   return r;
 }
 
@@ -4020,17 +4077,28 @@ static C* read_line(FILE* in){
 }
 
 I main(I argc, C** argv){
+  dbg_write_startup("dbg: main start\n");
 #if defined(_WIN32)
-  SetConsoleOutputCP(65001);
+  {
+    // Only attempt to change the console code page when stdout is an actual console.
+    // When stdout is redirected (e.g. piped from PowerShell), there may be no console attached.
+    HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if(hout && hout != INVALID_HANDLE_VALUE && GetConsoleMode(hout, &mode)){
+      SetConsoleOutputCP(65001);
+    }
+  }
   AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
   AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){printf("VA 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #else
   AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){printf("mmap 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
   AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){printf("mmap 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #endif
+  dbg_write_startup("dbg: arenas reserved\n");
   printf("AB[0] AC[0] AI[0] %lld %lld %lld\n",(long long)AB[0],AC[0],AI[0]);
   printf("AB[1] AC[1] AI[1] %lld %lld %lld\n",(long long)AB[1],AC[1],AI[1]);
   buddyinit(1);
+  dbg_write_startup("dbg: buddyinit done\n");
   FT_addr = vca(1, 3, 3, 4096);
   FT_sz   = vca(1, 3, 3, 4096);
   FT_cap  = vca(1, 3, 3, 4096);
@@ -4038,6 +4106,7 @@ I main(I argc, C** argv){
   FT_fn   = vca(1, 0, 3, 4096);
   G=dni(0,3,0,1); // global dictionary in buddy allocator
   sym_init();
+  dbg_write_startup("dbg: sym_init done\n");
   Q ft = dni(0,3,0,1); // file table dict in buddy allocator
   dkv(ft, sym_intern_bytes("addr", 4), FT_addr);
   dkv(ft, sym_intern_bytes("sz",   2), FT_sz);
@@ -4046,14 +4115,31 @@ I main(I argc, C** argv){
   dkv(ft, sym_intern_bytes("fn",   2), FT_fn);
   dkv(G,  sym_intern_bytes("FT",   2), ft);
   SC[0]=dni(0,3,0,0); SP=0;
+  dbg_write_startup("dbg: globals ready\n");
+
+  // In non-interactive/scripted usage (e.g. tests), stdin may not be a real console.
+  // Avoid entering the REPL in that case to prevent stdio/handle edge-case crashes.
+  B stdin_is_console = 0;
+#if defined(_WIN32)
+  {
+    HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    stdin_is_console = (hin && hin != INVALID_HANDLE_VALUE && GetConsoleMode(hin, &mode)) ? 1 : 0;
+  }
+#else
+  stdin_is_console = isatty(fileno(stdin)) ? 1 : 0;
+#endif
 
   if(argc > 1){
     if(!ends_with_dot_l(argv[1])){
       printf("usage: l script.l\n");
     }else{
+      dbg_write_startup("dbg: eval_code_file start\n");
       Q r = eval_code_file(argv[1]);
+      dbg_write_startup("dbg: eval_code_file done\n");
       pr(r);printf("\n");
     }
+    if(!stdin_is_console) return 0;
   }
 
   while (1) {

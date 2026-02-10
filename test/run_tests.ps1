@@ -55,3 +55,4 @@ Invoke-LangScript "test\\symbol_print.l" '`abc'
 Invoke-LangScript "test\\symmap_print.l" "1"
 Invoke-LangScript "test\\symbol_list_literal.l" "1"
 Invoke-LangScript "test\\tag64.l" "1"
+Invoke-LangScript "test\\bracket_index.l" "1"

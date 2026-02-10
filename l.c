@@ -11,9 +11,11 @@
 #include <errno.h>
 #include <math.h>
 #include <time.h>
-#if defined(_MSC_VER)
-  #include <intrin.h>
+#if defined(_WIN32)
   #include <windows.h>
+  #if defined(_MSC_VER)
+    #include <intrin.h>
+  #endif
 #else
   #include <sys/mman.h>
   #include <fcntl.h>
@@ -203,7 +205,7 @@ static inline Q buddy_units_from_order(B ord){
   return 1ULL << ord;
 }
 static inline void commit_range(void* p, Q bytes){
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   VirtualAlloc(p, bytes, MEM_COMMIT, PAGE_READWRITE);
 #else
   Q a=(Q)p, m=4095;
@@ -675,7 +677,13 @@ Q fk(Q* ht,Q k,D c,Q keys){                                                     
   return fk_h(ht, k, qhash64(k), c, keys);
 }
 Q SC[1024]; D SP=0;Q G;
+// Open list builders (for both (...) list literals and postfix [...] indexing lists).
 Q NL[1024]; D LP=0;
+// For each open list builder depth LP: expected closing token (')' or ']'), and kind (0=list literal, 1=postfix index).
+C LC[1024];
+B LK[1024];
+// For LK==1 (postfix index), the base value being indexed (kept alive across unbalanced input).
+Q LBASE[1024];
 
 Q dki(Q d, Q k){                                                                // inner "dictionary key" lookup for a single dictionary
   if(!ip(d)||2!=sh(d)) return 0;                                                // Not a dictionary
@@ -1078,7 +1086,7 @@ static inline Q sym_intern_bytes(const C* bytes, D len){
 void* os_map(char* fn, Q* sz, Q* h_out){
   void* addr = 0;
   int is_new = 0;
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   HANDLE hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if(hf == INVALID_HANDLE_VALUE) {
     hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -1109,7 +1117,7 @@ void* os_map(char* fn, Q* sz, Q* h_out){
 
 void* os_map_ro(char* fn, Q* sz, Q* h_out){
   void* addr = 0;
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   HANDLE hf = CreateFileA(fn, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if(hf == INVALID_HANDLE_VALUE) return 0;
   LARGE_INTEGER li;
@@ -1138,7 +1146,7 @@ void* os_map_ro(char* fn, Q* sz, Q* h_out){
 
 void os_unmap_ro(void* addr, Q sz, Q h){
   if(!addr || addr==(void*)1) return;
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   UnmapViewOfFile(addr);
   CloseHandle((HANDLE)h);
 #else
@@ -1155,7 +1163,7 @@ void os_unmap(D fid){
 
   if(!addrs[fid]) return;
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   UnmapViewOfFile((void*)addrs[fid]);
   CloseHandle((HANDLE)hs[fid]);
 #else
@@ -1188,7 +1196,7 @@ D find_empty_ft_slot(){
 }
 
 void os_truncate(Q h, Q sz){
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   HANDLE hf = (HANDLE)h;
   LARGE_INTEGER li; li.QuadPart = sz;
   SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf);
@@ -1198,7 +1206,7 @@ void os_truncate(Q h, Q sz){
 }
 
 void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   UnmapViewOfFile(addr);
   HANDLE hf = (HANDLE)h;
   HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, (DWORD)(new_cap >> 32), (DWORD)new_cap, NULL);
@@ -1229,7 +1237,7 @@ static inline Q os_align16(Q x){ return (x + 15ULL) & ~15ULL; }
 
 static void* os_heap_alloc(Q payload_bytes){
   Q total = os_align16((Q)sizeof(OsHeapHdr) + payload_bytes);
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   void* base = VirtualAlloc(0, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
   if(!base) return 0;
 #else
@@ -1255,7 +1263,7 @@ static void os_heap_free(void* p){
   OsHeapHdr* h = ((OsHeapHdr*)p) - 1;
   if(h->magic != OSHEAP_MAGIC) return;
   Q total = h->total_bytes;
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   VirtualFree((void*)h, 0, MEM_RELEASE);
 #else
   munmap((void*)h, (size_t)total);
@@ -1729,7 +1737,7 @@ static inline Q vne_u(Q ar, B t, B z, D n){
 }
 
 static inline Q now_ns_u64(void){
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   static Q qpc_freq = 0;
   if(!qpc_freq){
     LARGE_INTEGER f;
@@ -2817,6 +2825,23 @@ Q bench(B A, Q v, Q a, Q w){
 Q Ap(Q a){Q p=tsna(0,4,1,3,1,1);pid(p,0,a);return p;}
 Q e(Q** q);
 Q E(Q** q,C tc);
+Q ecl(Q** q);
+
+static inline Q apply_index_over(Q base, Q idxs){
+  // Syntax sugar for: @<-(base; idx0; idx1; ...)
+  // (Derived verb: '@' with adverb id 3 ('←') => fold/over.)
+  D ni = ii(idxs) ? 1 : n(idxs);
+  Q args = ln(ni + 1);
+  zid(args, 0, base);
+  if(ii(idxs)){
+    zid(args, 1, idxs);
+  }else{
+    for(D i=0;i<ni;i++) zid(args, i+1, qi(idxs, i));
+  }
+  Q v = derive_verb(av(3), aa(3)); // '@' is VT[3], '←' is AT[3]
+  return dispatch(VM, VBM, v, 0, args);
+}
+
 Q eoc(Q** q){
   (*q)++;                                                                      // consume '{'
   if(SP+1 >= 1024) return ac(99);                                              // scope depth overflow
@@ -2845,21 +2870,69 @@ Q eol(Q** q){
   if(LP+1 >= 1024) return ac(99);
   LP++;D clp=LP;
   NL[LP] = vca(0, 0, 3, 64);
+  LC[LP] = ')';
+  LK[LP] = 0;
+  LBASE[LP] = 0;
   (void)E(q,')');                                                              // Evaluate until ')' or end-of-stream, appending values.
   if(**q && 34==t(**q) && ')'==dc(**q)){                                       // If ')' is present, consume it and close the list.
-    (*q)++;
-    Q l = NL[clp];
-    if(LP>0) LP--;
-    return l;
+    return ecl(q);
   }
   return NL[clp];                                                              // Leave the list open across end-of-stream.
 }
+
+Q eob(Q** q){
+  (*q)++;                                                                      // consume '['
+  if(LP+1 >= 1024) return ac(99);
+  LP++;D clp=LP;
+  NL[LP] = vca(0, 0, 3, 64);
+  LC[LP] = ']';
+  LK[LP] = 0;
+  LBASE[LP] = 0;
+  (void)E(q,']');                                                              // Evaluate until ']' or end-of-stream, appending values.
+  if(**q && 34==t(**q) && ']'==dc(**q)){
+    return ecl(q);
+  }
+  return NL[clp];
+}
+
+Q eib(Q base, Q** q){
+  (*q)++;                                                                      // consume '[' (postfix indexing)
+  if(LP+1 >= 1024) return ac(99);
+  LP++;
+  NL[LP] = vca(0, 0, 3, 64);
+  LC[LP] = ']';
+  LK[LP] = 1;
+  LBASE[LP] = base; ir(base);
+  (void)E(q,']');                                                              // Evaluate until ']' or end-of-stream, appending indices.
+  if(**q && 34==t(**q) && ']'==dc(**q)){
+    return ecl(q);                                                             // close + apply index
+  }
+  // Unbalanced '[': keep builder open for future input.
+  return apply_index_over(LBASE[LP], NL[LP]);
+}
+
 Q ecl(Q** q){
-  (*q)++;                                                                      // consume ')'
+  // Close the most recent open list builder, or postfix index builder.
+  Q a = **q;
+  if(!a || 34!=t(a)) return ac(2);
+  C close_tc = (C)dc(a);
+  (*q)++;                                                                      // consume the close token
   if(LP==0) return ac(2);
-  Q l=NL[LP];
+  if(LC[LP] && close_tc != LC[LP]) return ac(2);
+
+  Q l = NL[LP];
+  B kind = LK[LP];
+  Q base = LBASE[LP];
+
+  LC[LP] = 0;
+  LK[LP] = 0;
+  LBASE[LP] = 0;
   LP--;
-  return l;
+
+  if(kind==0) return l;
+  Q r = apply_index_over(base, l);
+  dr(base);
+  return r;
 }
 
 Q emv(Q** q){
@@ -2892,7 +2965,7 @@ Q E(Q** q, C tc){
     if(tc && 34==t(a) && tc==dc(a)) break;
     if(34==t(a) && (';'==dc(a) || '\n'==dc(a))){(*q)++; continue;}                // ignore empty statements
     r=e(q);                                                                        // e() consumes exactly one expression
-    if(tc==')' && !(4==t(r) && 0==n(r))){                                          // list literal capture (skip "missing")
+    if((tc==')' || tc==']') && !(4==t(r) && 0==n(r))){                              // list capture (skip "missing")
       Q v = r;
       if(ip(r) && 0==t(r)){
         Q stack[64];
@@ -2922,24 +2995,35 @@ Q e(Q** q){
     if(';'==c || '\n'==c){(*q)++; return tsna(0,4,1,3,0,0);}                     // terminator => missing
     if('{'==c){
       Q noun = eoc(q);
+      while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);          // postfix indexing
       Q w = **q;
-      B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+      B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w) || ']'==dc(w)));
       if(!end && w && 2==t(w)) return edv(noun, q);                              // allow `{...}v w`
       return noun;
     }
     if('('==c){
       Q noun = eol(q);
+      while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);          // postfix indexing
       Q w = **q;
-      B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+      B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w) || ']'==dc(w)));
       if(!end && w && 2==t(w)) return edv(noun, q);                              // allow `(a;b)v w`
+      return noun;
+    }
+    if('['==c){
+      Q noun = eob(q);
+      while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);          // postfix indexing
+      Q w = **q;
+      B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w) || ']'==dc(w)));
+      if(!end && w && 2==t(w)) return edv(noun, q);
       return noun;
     }
     if('}'==c) return ecc(q);
     if(')'==c) return ecl(q);
+    if(']'==c) return ecl(q);
   }
 
   Q w=(*q)[1];                                                                   // safe: token streams are 0-terminated
-  B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w)));
+  B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w) || ']'==dc(w)));
 
   if(2==t(a) && !end) return emv(q);                                             // monadic verb chain
   if(2==t(a) && end){(*q)++; return Ap(a);}                                      // partial at end-of-expression
@@ -2947,8 +3031,14 @@ Q e(Q** q){
   if(!end && w && 2==t(w)){(*q)++; return edv(a, q);}                            // dyadic a v w...
 
   (*q)++;                                                                        // consume noun/reference
-  if(1==t(a)) return dk(SC[SP],a);
-  return a;
+  Q noun = (1==t(a)) ? dk(SC[SP], a) : a;
+  while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);              // postfix indexing
+
+  Q v = **q;
+  Q w2 = (*q)[1];
+  B end2 = !w2 || (34==t(w2) && (';'==dc(w2) || '\n'==dc(w2) || '}'==dc(w2) || ')'==dc(w2) || ']'==dc(w2)));
+  if(v && 2==t(v) && !end2) return edv(noun, q);                                 // dyadic (after postfix indexing)
+  return noun;
 }
 
 Q R(C a){return ('a'<=a&&a<='z')?ar(a-'a'):0;}
@@ -3133,7 +3223,25 @@ static Q eval_code_tape(const C* src, D len){
   if(!tokens_base) return ac(2);
   if(dump_tokens_enabled()) dump_token_tape(tokens_base);
   Q* tokens = tokens_base;
-  Q r = E(&tokens, '\0');
+  Q r = tsna(0,4,1,3,0,0); // missing
+  for(;;){
+    if(LP>0){
+      C tc = LC[LP] ? LC[LP] : ')';
+      r = E(&tokens, tc);
+      if(LP>0 && LK[LP]==1 && !(*tokens && 34==t(*tokens) && tc==dc(*tokens))){
+        r = apply_index_over(LBASE[LP], NL[LP]);
+      }
+      if(*tokens && 34==t(*tokens) && tc==dc(*tokens)){
+        r = ecl(&tokens);
+        if(*tokens) continue;
+      }
+      break;
+    }else{
+      Q r2 = E(&tokens, '\0');
+      if(!(4==t(r2) && 0==n(r2))) r = r2;
+      break;
+    }
+  }
   os_heap_free(tokens_base);
   return r;
 }
@@ -3161,6 +3269,7 @@ Q* lx_len(const C* b, D l){
     if(*p=='\r'){q[qi++]=ac('\n');p++;if(p<end && *p=='\n')p++;st=0;continue;}
     if(*p==';'){q[qi++]=ac(';');p++;st=0;continue;}
     if(*p=='\t'){p++;continue;}
+    if(*p=='[' || *p==']'){q[qi++]=ac(*p);p++;st=0;continue;}
 
     // Tag literal: `$...` (tag64). Uses '$' as a delimiter like '`' for symbols.
     // Allowed digits: _ A-Z a-z 0-9 .  (max 10 digits => 60 bits)
@@ -3420,7 +3529,7 @@ static C* read_line(FILE* in){
 }
 
 I main(I argc, C** argv){
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   SetConsoleOutputCP(65001);
   AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
   AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){printf("VA 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
@@ -3472,18 +3581,24 @@ I main(I argc, C** argv){
     Q* tokens_base = lx_len(line, (D)strlen(line));
     if(!tokens_base){ os_heap_free(line); pr(ac(2)); printf("\n"); continue; }
     Q* tokens = tokens_base;
-    Q r;
-    if(LP>0){
-      r=E(&tokens,')');                                                         // evaluate as list-body, appending into the open builder
-      if(*tokens && 34==t(*tokens) && ')'==dc(*tokens)){
-        r=ecl(&tokens);                                                         // close the open list and return it
-        if(*tokens){
-          Q r2=E(&tokens,'\0');                                                  // evaluate any trailing code outside list context
-          if(!(4==t(r2) && 0==n(r2))) r=r2;
+    Q r = tsna(0,4,1,3,0,0);                                                    // missing
+    for(;;){
+      if(LP>0){
+        C tc = LC[LP] ? LC[LP] : ')';
+        r = E(&tokens, tc);                                                     // evaluate inside the open builder
+        if(LP>0 && LK[LP]==1 && !(*tokens && 34==t(*tokens) && tc==dc(*tokens))){
+          r = apply_index_over(LBASE[LP], NL[LP]);                               // show current postfix-index result while unbalanced
         }
+        if(*tokens && 34==t(*tokens) && tc==dc(*tokens)){
+          r = ecl(&tokens);                                                     // close the open builder
+          if(*tokens) continue;                                                 // trailing tokens may still be in an outer context
+        }
+        break;
+      }else{
+        Q r2 = E(&tokens,'\0');
+        if(!(4==t(r2) && 0==n(r2))) r = r2;
+        break;
       }
-    }else{
-      r=E(&tokens,'\0');
     }
     os_heap_free(tokens_base);
     pr(r);printf("\n");

@@ -46,6 +46,7 @@ typedef Q(*VF)(B,Q,Q,Q);                                                        
 #define T_SYM   7
 #define T_FLT   8
 #define T_TAG   10
+#define T_LAMBDA 11
 
 // Symbol payload tagging (within the 60-bit immediate payload or 64-bit vector element):
 // - LSB==1 => interned symbol id (payload>>1 is the id/index into symtab)
@@ -716,13 +717,27 @@ Q dk(Q d, Q k){                                                                 
 static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth);
 
 static inline B is_nf(Q q){ return 34==t(q) && dc(q)==4; }
-static inline B is_fatal_clone_control(Q q){ return 34==t(q) && !is_nf(q); }
+static inline B is_fatal_clone_control(Q q){
+  if(34!=t(q)) return 0;
+  Q code = dc(q);
+  // Controls serve double-duty: grammar tokens (e.g. '[', ';', '\n') and error sentinels (small numeric codes).
+  // Cloning should only treat non-grammar sentinel controls as fatal.
+  if(code==4) return 0;                 // nf is a normal value
+  if(code=='\n' || code==';') return 0; // statement separators are safe to embed (e.g. in lambda bodies)
+  if(code>=32 && code<=126) return 0;   // printable ASCII controls are grammar tokens
+  return 1;                             // non-printable / out-of-band controls => fatal
+}
+
+static inline Q clone_lambda_for_embed(Q q, Q dest_ar, Q* stack, D depth);
 
 static inline Q clone0_for_embed0(Q q, Q dest_ar, Q* stack, D depth){
-  if(!ip(q) || t(q)!=0) return q;
+  if(!ip(q)) return q;
+  B tq = t(q);
+  if(tq!=0 && tq!=T_LAMBDA) return q;
   if(depth >= 64) return ac(99);
   for(D i=0;i<depth;i++) if(stack[i]==q) return ac(2);                           // cycle detected
   stack[depth]=q;
+  if(tq==T_LAMBDA) return clone_lambda_for_embed(q, dest_ar, stack, depth+1);
   return clone0_for_embed(q, dest_ar, stack, depth+1);
 }
 
@@ -776,6 +791,22 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
   }
 
   return ac(1);                                                                   // unsupported shape
+}
+
+static inline Q clone_lambda_for_embed(Q q, Q dest_ar, Q* stack, D depth){
+  if(!ip(q) || t(q)!=T_LAMBDA || sh(q)!=1 || n(q)!=2) return ac(1);
+  Q params = pi(q, 0);
+  Q body = pi(q, 1);
+
+  Q params2 = clone0_for_embed0(params, dest_ar, stack, depth);
+  if(is_fatal_clone_control(params2)) return params2;
+  Q body2 = clone0_for_embed0(body, dest_ar, stack, depth);
+  if(is_fatal_clone_control(body2)) return body2;
+
+  Q r = tsna(dest_ar, T_LAMBDA, 1, 3, 2, 2);
+  zid(r, 0, params2);
+  zid(r, 1, body2);
+  return r;
 }
 
 Q dkv(Q d,Q k,Q v){
@@ -849,6 +880,11 @@ void dr(Q q){
   if(!q || ii(q)){return;}                                                    // if null or atom just return
   if(0< --ptr(q)[3]){return;}                                                 // if there is a nonzero refcount return
   if(!t(q)){for(D i=0;i<n(q);i++){dr(qi(q,i));}}                              // this object has refcount==0. if type 0, recurse on children
+  if(T_LAMBDA==t(q)){
+    // Lambda is a small pointer container: (params_symvec; body_token_list)
+    dr(pi(q, 0));
+    dr(pi(q, 1));
+  }
   if(1==ha(q))buddyfree(q);                                                   // then free this q
   return;                                                                     // should I consider returning a control sentinel here (type)
 }
@@ -920,6 +956,16 @@ Q q2a(Q dest_ar, Q q) {
         if (dest_a != 2 || (q >> 44) == dest_fid) return q;
     }
 
+    if(t(q)==T_LAMBDA){
+        Q params = q2a(dest_ar, pi(q, 0));
+        Q body = q2a(dest_ar, pi(q, 1));
+        if (AR_ID(dest_ar) == 2) { params = strip_fid(params); body = strip_fid(body); }
+        Q res = tsna(dest_ar, T_LAMBDA, 1, 3, 2, 2);
+        zid(res, 0, params);
+        zid(res, 1, body);
+        return res;
+    }
+
     if (sh(q) == 0) return heap_atom_from(dest_ar, q);
     if (sh(q) == 1) return q2a_list(dest_ar, q);
     if (sh(q) == 2) return q2a_dict(dest_ar, q);
@@ -942,6 +988,7 @@ static Q SYM_MAP = 0;   // dict: charvec -> int (id), in buddy arena; exposed as
 static Q SYM_K_TAB = 0; // symbol key for global dict
 static Q SYM_K_MAP = 0;
 static Q SYM_PAY_IF = 0; // reference payload for keyword `if` (interned symbol payload)
+// Lambdas are heap objects of type T_LAMBDA (not marker-tagged lists).
 
 static inline Q qhash_charvec_bytes(const C* bytes, D len){
   Q h0 = mix64(((Q)T_CHAR<<56) ^ ((Q)1<<48) ^ ((Q)0<<40) ^ (Q)len);
@@ -1472,7 +1519,7 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 33
+#define VTZ 34
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -1537,6 +1584,93 @@ static inline void pr_f64(double x){
   else printf("%s", buf);
 }
 
+static inline void pr_adv_ascii(D ai){
+  switch(ai){
+    case 0: return;
+    case 1: printf("'"); return;
+    case 2: printf("->"); return;
+    case 3: printf("<-"); return;
+    case 4: printf("<'"); return;
+    case 5: printf("'>"); return;
+    case 6: printf("'v"); return;
+    case 7: printf("'^"); return;
+    case 8: printf("<o"); return;
+    case 9: printf("o>"); return;
+    case 10: printf("/'"); return;
+    case 11: printf("\\'"); return;
+    case 12: printf("<p"); return;
+    case 13: printf("p>"); return;
+    default: printf("%s", (ai < (D)ATZ) ? AT[ai] : "?"); return;
+  }
+}
+
+static inline void pr_control_ascii(Q q){
+  Q code = dc(q);
+  if(code=='\n'){ putchar('\n'); return; }
+  if(code>=32 && code<=126){ putchar((C)code); return; }
+  pr(q);
+}
+
+static void pr_lambda_roundtrip(Q lam);
+
+static inline void pr_verb_roundtrip(Q v){
+  Q vv=v;
+  D advs[32];D nadv=0;
+  while(dv(vv)>=(Q)VTZ && nadv<32){
+    Q x=dv(vv)-(Q)VTZ;
+    advs[nadv++]=(D)(x%(Q)ATZ)+1;
+    vv=av(x/(Q)ATZ);
+  }
+  Q base=dv(vv);
+  printf("%s", base<(Q)VTZ ? VT[base] : "?");
+  for(D i=nadv;i>0;--i) pr_adv_ascii(advs[i-1]);
+}
+
+static inline void pr_token_roundtrip(Q tok){
+  if(!tok) return;
+  if(34==t(tok) && sh(tok)==0){ pr_control_ascii(tok); return; }
+  if(18==t(tok) && sh(tok)==0){ pr_adv_ascii((D)da(tok)); return; }
+  if(2==t(tok) && sh(tok)==0){ pr_verb_roundtrip(tok); return; }
+  if(T_LAMBDA==t(tok)){ pr_lambda_roundtrip(tok); return; }
+  pr(tok);
+}
+
+static void pr_lambda_roundtrip(Q lam){
+  if(!ip(lam) || t(lam)!=T_LAMBDA || sh(lam)!=1 || n(lam)!=2){ pr(lam); return; }
+  Q params = pi(lam, 0);
+  Q body = pi(lam, 1);
+  if(!ip(params) || t(params)!=T_SYM || sh(params)!=1){ pr(lam); return; }
+  if(!ip(body) || t(body)!=0 || sh(body)!=1){ pr(lam); return; }
+
+  printf("{[");
+  D np = n(params);
+  for(D i=0;i<np;i++){
+    if(i) printf(";");
+    pr_sym_payload(pi(params, i));
+  }
+  printf("]");
+
+  D nt = n(body);
+  if(nt){
+    // Add a single space before the body unless it starts with a statement terminator/newline.
+    Q t0 = pi(body, 0);
+    if(!(34==t(t0) && sh(t0)==0 && (';'==(C)dc(t0) || '\n'==(C)dc(t0)))) putchar(' ');
+
+    for(D i=0;i<nt;i++){
+      Q cur = pi(body, i);
+      if(i){
+        Q prev = pi(body, i-1);
+        B prev_is_ctl = (34==t(prev) && sh(prev)==0);
+        B cur_is_ctl = (34==t(cur) && sh(cur)==0);
+        if(!prev_is_ctl && !cur_is_ctl) putchar(' ');
+      }
+      pr_token_roundtrip(cur);
+    }
+  }
+
+  printf("}");
+}
+
 void pr(Q q){
   if(0==q){return;}
   if(0==t(q)){
@@ -1569,6 +1703,9 @@ void pr(Q q){
     }
   }
   if(18==t(q)){printf("%s",AT[da(q)]);}
+  if(T_LAMBDA==t(q)){
+    pr_lambda_roundtrip(q);
+  }
   if(34==t(q)){
     Q code = dc(q);
     if(code==2){ printf("qi"); return; }                                         // generic error
@@ -2367,6 +2504,29 @@ Q at(B A,Q v,Q a,Q w){
     return ac(1);
   }
 
+  // Lambda introspection: lam@0 => params, lam@1 => body
+  if(ip(a) && t(a)==T_LAMBDA && sh(a)==1 && n(a)==2){
+    if(ii(w)){
+      if(t(w)!=T_INT) return ac(2);
+      J idx = (J)ra(w);
+      if(idx<0 || idx>1) return ac(2);
+      return pi(a, (D)idx);
+    }
+    if(sh(w)==1){
+      D nw=n(w);
+      Q z = ln(nw);
+      for(D i=0;i<nw;i++){
+        Q wi = qi(w, i);
+        if(t(wi)!=T_INT) return ac(2);
+        J idx = (J)ra(wi);
+        if(idx<0 || idx>1) return ac(2);
+        zid(z, i, pi(a, (D)idx));
+      }
+      return z;
+    }
+    return ac(1);
+  }
+
   B aa=ii(a),aw=ii(w);B nz=n(w);
   if(aw){return aa?a:qi(a,ra(w));} // TODO: arena awareness
   Q z=vna(0,t(a),ls(a),nz);
@@ -2421,6 +2581,11 @@ static B match_struct(Q a, Q w, D depth){
   // Dictionaries are structural: ignore internal hash table contents.
   if(sa==2 && ta==0){
     return match_struct(pi(a,1), pi(w,1), depth+1) && match_struct(pi(a,2), pi(w,2), depth+1);
+  }
+
+  // Lambdas are structural: compare fields.
+  if(ta==T_LAMBDA){
+    return match_struct(pi(a,0), pi(w,0), depth+1) && match_struct(pi(a,1), pi(w,1), depth+1);
   }
 
   // Pointer lists (and partial-eval sequences) compare recursively.
@@ -2626,8 +2791,9 @@ Q setmxcsr(B A, Q v, Q a, Q w);
 Q ticks(B A, Q v, Q a, Q w);
 Q ev(B A, Q v, Q a, Q w);
 Q bench(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev};
+Q aply(B A, Q v, Q a, Q w);
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -2663,6 +2829,7 @@ static const BM VBM[VTZ]={
   /* 30 */ NB, // ticks
   /* 31 */ NB, // bench
   /* 32 */ NB, // eval
+  /* 33 */ NB, // apply
 };
 
 static const BM VBD[VTZ]={
@@ -2699,8 +2866,9 @@ static const BM VBD[VTZ]={
   /* 30 */ NB, // ticks
   /* 31 */ NB, // bench
   /* 32 */ NB, // eval
+  /* 33 */ NB, // apply
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -2841,6 +3009,87 @@ Q bench(B A, Q v, Q a, Q w){
   return z;
 }
 
+static inline B is_lambda_obj(Q q);
+Q E(Q** q, C tc, B capture);
+
+Q aply(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+
+  // Allow applying partial-wrapped verbs (e.g. p:+; p apply (2;3)).
+  if(t(a)==4){
+    if(!ip(a) || sh(a)!=1 || n(a)!=1) return ac(2);
+    a = pi(a, 0);
+  }
+
+  B w_is_list = ip(w) && t(w)==0 && sh(w)==1;
+  D nw = w_is_list ? n(w) : 1;
+
+  // Apply a verb.
+  if(t(a)==2){
+    if(nw==1){
+      Q omega = w_is_list ? qi(w, 0) : w;
+      return dispatch(VM, VBM, a, 0, omega);
+    }
+    if(nw==2){
+      Q alpha = qi(w, 0);
+      Q omega = qi(w, 1);
+      return dispatch(VD, VBD, a, alpha, omega);
+    }
+    return ac(2);
+  }
+
+  // Apply a lambda.
+  if(is_lambda_obj(a)){
+    Q params = pi(a, 0);
+    Q body = pi(a, 1);
+    if(!ip(params) || t(params)!=T_SYM || sh(params)!=1){
+      return ac(2);
+    }
+    if(!ip(body) || t(body)!=0 || sh(body)!=1){
+      return ac(2);
+    }
+    D np = n(params);
+
+    if(!w_is_list){
+      if(np!=1){
+        return ac(2);
+      }
+    }else{
+      if((D)nw!=np){
+        return ac(2);
+      }
+    }
+
+    if(SP+1 >= 1024) return ac(99);
+    SP++;
+    SC[SP] = dn(0,3,0,0);
+
+    for(D i=0;i<np;i++){
+      Q key = as(pi(params, i));
+      Q val = w_is_list ? qi(w, i) : w;
+      dkv(SC[SP], key, val);
+    }
+
+    D nt = n(body);
+    Q tape_small[256];
+    Q* tape = tape_small;
+    if(nt + 1ULL > (D)(sizeof(tape_small)/sizeof(tape_small[0]))){
+      tape = (Q*)os_heap_alloc((Q)(nt + 1ULL) * (Q)sizeof(Q));
+      if(!tape){ if(SP>0) SP--; return ac(2); }
+    }
+    for(D i=0;i<nt;i++) tape[i] = pi(body, i);
+    tape[nt] = 0;
+    Q* tp = tape;
+    Q r = E(&tp, '\0', 0);
+    if(tape != tape_small) os_heap_free(tape);
+
+    if(SP>0) SP--;
+    return r;
+  }
+
+  return ac(2);
+}
+
 Q Ap(Q a){Q p=tsna(0,4,1,3,1,1);pid(p,0,a);return p;}
 Q e(Q** q);
 Q E(Q** q,C tc, B capture);
@@ -2859,6 +3108,22 @@ static inline Q apply_index_over(Q base, Q idxs){
   }
   Q v = derive_verb(av(3), aa(3)); // '@' is VT[3], '←' is AT[3]
   return dispatch(VM, VBM, v, 0, args);
+}
+
+static inline B is_bracket_call_target(Q base){
+  // Allow f[...] to call when f is callable.
+  // - lambdas (T_LAMBDA)
+  // - verbs (t==2)
+  // - partial-wrapped verbs (t==4) (aply unwraps)
+  B tb = t(base);
+  return (tb==T_LAMBDA) || (tb==2) || (tb==4);
+}
+
+static inline Q apply_brackets(Q base, Q args){
+  // If base is callable, treat postfix [...] as a call: base apply args.
+  // Otherwise treat it as indexing sugar: @<-(base; args...).
+  if(is_bracket_call_target(base)) return aply(0, 0, base, args);
+  return apply_index_over(base, args);
 }
 
 Q eoc(Q** q){
@@ -2920,7 +3185,7 @@ Q eib(Q base, Q** q){
     return ecl(q);                                                             // close + apply index
   }
   // Unbalanced '[': keep builder open for future input.
-  return apply_index_over(LBASE[LP], NL[LP]);
+  return apply_brackets(LBASE[LP], NL[LP]);
 }
 
 Q ecl(Q** q){
@@ -2942,7 +3207,7 @@ Q ecl(Q** q){
   LP--;
 
   if(kind==0) return l;
-  Q r = apply_index_over(base, l);
+  Q r = apply_brackets(base, l);
   dr(base);
   return r;
 }
@@ -3048,6 +3313,102 @@ static Q eif(Q** q){
   return tsna(0,4,1,3,0,0); // missing
 }
 
+static inline B is_lambda_obj(Q q){
+  return ip(q) && t(q)==T_LAMBDA && sh(q)==1 && n(q)==2;
+}
+
+static Q elam(Q** q){
+  // Lambda: {[a;b;...] body}
+  // Stores (heap type T_LAMBDA): (params_symvec; body_token_list)
+  if(!(**q && 34==t(**q) && '{'==(C)dc(**q))) return ac(2);
+  (*q)++; // consume '{'
+
+  if(!(**q && 34==t(**q) && '['==(C)dc(**q))) return ac(2);
+  (*q)++; // consume '['
+
+  // Parse parameter list: refs/symbols separated by ';' or newlines.
+  Q tmp_params[64];
+  Q* params = tmp_params;
+  D nparams = 0;
+  D cap = (D)(sizeof(tmp_params)/sizeof(tmp_params[0]));
+  for(;;){
+    Q tok = **q;
+    if(!tok) return ac(2);
+    if(34==t(tok)){
+      C c = (C)dc(tok);
+      if(c==';' || c=='\n'){ (*q)++; continue; }
+      if(c==']'){ (*q)++; break; }
+      return ac(2);
+    }
+    if(t(tok)==1){
+      Q payload = ra(tok);
+      if(nparams >= cap){
+        D new_cap = cap + (cap>>1) + 8;
+        Q* np = (Q*)os_heap_alloc((Q)new_cap * (Q)sizeof(Q));
+        if(!np) return ac(2);
+        memcpy(np, params, (size_t)cap * sizeof(Q));
+        if(params != tmp_params) os_heap_free(params);
+        params = np;
+        cap = new_cap;
+      }
+      params[nparams++] = payload;
+      (*q)++;
+      continue;
+    }
+    if(t(tok)==T_SYM){
+      Q payload = ra(tok);
+      if(nparams >= cap){
+        D new_cap = cap + (cap>>1) + 8;
+        Q* np = (Q*)os_heap_alloc((Q)new_cap * (Q)sizeof(Q));
+        if(!np) return ac(2);
+        memcpy(np, params, (size_t)cap * sizeof(Q));
+        if(params != tmp_params) os_heap_free(params);
+        params = np;
+        cap = new_cap;
+      }
+      params[nparams++] = payload;
+      (*q)++;
+      continue;
+    }
+    return ac(2);
+  }
+
+  Q params_vec = vna(0, T_SYM, 3, nparams);
+  for(D i=0;i<nparams;i++) pid(params_vec, i, params[i]);
+  if(params != tmp_params) os_heap_free(params);
+
+  // Capture body tokens until matching '}' (no unbalanced support).
+  Q* body_start = *q;
+  D depth = 0;
+  for(;;){
+    Q tok = **q;
+    if(!tok) return ac(2);
+    if(34==t(tok)){
+      C c = (C)dc(tok);
+      if(c=='{' || c=='(' || c=='['){ depth++; (*q)++; continue; }
+      if(c=='}' || c==')' || c==']'){
+        if(c=='}' && depth==0) break;
+        if(depth>0) depth--;
+        (*q)++; continue;
+      }
+    }
+    (*q)++;
+  }
+  Q* body_end = *q; // points at closing '}'
+
+  D ntok = (D)(body_end - body_start);
+  Q body = ln(ntok);
+  for(D i=0;i<ntok;i++) zid(body, i, body_start[i]);
+
+  if(!(**q && 34==t(**q) && '}'==(C)dc(**q))) return ac(2);
+  (*q)++; // consume '}'
+
+  Q lam = tsna(0, T_LAMBDA, 1, 3, 2, 2);
+  zid(lam, 0, params_vec);
+  zid(lam, 1, body);
+  return lam;
+}
+
 Q emv(Q** q){
   Q v=*(*q)++;
   while(18==t(**q)){v=derive_verb(v,*(*q)++);}
@@ -3107,7 +3468,8 @@ Q e(Q** q){
     C c = (C)dc(a);
     if(';'==c || '\n'==c){(*q)++; return tsna(0,4,1,3,0,0);}                     // terminator => missing
     if('{'==c){
-      Q noun = eoc(q);
+      Q next = (*q)[1];
+      Q noun = (next && 34==t(next) && '['==(C)dc(next)) ? elam(q) : eoc(q);
       while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);          // postfix indexing
       Q w = **q;
       B end = !w || (34==t(w) && (';'==dc(w) || '\n'==dc(w) || '}'==dc(w) || ')'==dc(w) || ']'==dc(w)));
@@ -3358,7 +3720,7 @@ static Q eval_code_tape(const C* src, D len){
       C tc = LC[LP] ? LC[LP] : ')';
       r = E(&tokens, tc, 1);
       if(LP>0 && LK[LP]==1 && !(*tokens && 34==t(*tokens) && tc==dc(*tokens))){
-        r = apply_index_over(LBASE[LP], NL[LP]);
+        r = apply_brackets(LBASE[LP], NL[LP]);
       }
       if(*tokens && 34==t(*tokens) && tc==dc(*tokens)){
         r = ecl(&tokens);
@@ -3716,7 +4078,7 @@ I main(I argc, C** argv){
         C tc = LC[LP] ? LC[LP] : ')';
         r = E(&tokens, tc, 1);                                                  // evaluate inside the open builder
         if(LP>0 && LK[LP]==1 && !(*tokens && 34==t(*tokens) && tc==dc(*tokens))){
-          r = apply_index_over(LBASE[LP], NL[LP]);                               // show current postfix-index result while unbalanced
+          r = apply_brackets(LBASE[LP], NL[LP]);                                 // show current postfix result while unbalanced
         }
         if(*tokens && 34==t(*tokens) && tc==dc(*tokens)){
           r = ecl(&tokens);                                                     // close the open builder

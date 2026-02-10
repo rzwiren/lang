@@ -64,12 +64,13 @@ This interpreter is essentially an abstract machine. It works off of a Q (quadwo
     2 - verbs
     18 - adverbs
     34 - control (todo split out control characters for errors at runtime from grammatical objects like (){}[])
-   3 - number
+   3 - integer
    4 - partial evaluation. never atom (eventually move this into grammatical?)
    5 - hash. never atom.
    6 - character
    7 - symbol
-   8 - file (todo)
+   8 - floating point
+   9 - file
   the metadata in a Q is type dependent (p:payload,f:fileid,a:arenaid,o:order,t:typetag). Data is organized into arenas 0-7
    0 -
     file backed 

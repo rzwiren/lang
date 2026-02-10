@@ -941,6 +941,7 @@ static Q SYM_TAB = 0;   // list of charvecs, in buddy arena; exposed as `symtab`
 static Q SYM_MAP = 0;   // dict: charvec -> int (id), in buddy arena; exposed as `symmap`
 static Q SYM_K_TAB = 0; // symbol key for global dict
 static Q SYM_K_MAP = 0;
+static Q SYM_PAY_IF = 0; // reference payload for keyword `if` (interned symbol payload)
 
 static inline Q qhash_charvec_bytes(const C* bytes, D len){
   Q h0 = mix64(((Q)T_CHAR<<56) ^ ((Q)1<<48) ^ ((Q)0<<40) ^ (Q)len);
@@ -1049,8 +1050,26 @@ static void sym_init(void){
     }
   }
 
+  // Bootstrap keyword payloads (like symtab/symmap) to guarantee they resolve as identifiers.
+  D id_if = 0;
+  B ok_if = symmap_lookup_id(SYM_MAP, "if", 2, &id_if);
+  if(!ok_if){
+    Q name = tsna_u(1, T_CHAR, 1, 0, 2, 2);
+    memcpy(p(name), "if", 2);
+    D idx = n(SYM_TAB);
+    Q tab2 = xn(SYM_TAB, 1);
+    if(34!=t(tab2)){
+      if(tab2!=SYM_TAB) SYM_TAB = tab2;
+      zid(SYM_TAB, idx, name);
+      dkv(SYM_MAP, name, an((J)idx));
+      id_if = idx;
+      ok_if = 1;
+    }
+  }
+
   SYM_K_TAB = as(SYM_PAYLOAD_INTERN(id_tab));
   SYM_K_MAP = as(SYM_PAYLOAD_INTERN(id_map));
+  if(ok_if) SYM_PAY_IF = SYM_PAYLOAD_INTERN(id_if);
   dkv(G, SYM_K_TAB, SYM_TAB);
   dkv(G, SYM_K_MAP, SYM_MAP);
 }
@@ -2824,7 +2843,7 @@ Q bench(B A, Q v, Q a, Q w){
 
 Q Ap(Q a){Q p=tsna(0,4,1,3,1,1);pid(p,0,a);return p;}
 Q e(Q** q);
-Q E(Q** q,C tc);
+Q E(Q** q,C tc, B capture);
 Q ecl(Q** q);
 
 static inline Q apply_index_over(Q base, Q idxs){
@@ -2847,7 +2866,7 @@ Q eoc(Q** q){
   if(SP+1 >= 1024) return ac(99);                                              // scope depth overflow
   SP++;D csp=SP;                                                               // cache the SP of this new allocation, return that.
   SC[SP] = dn(0,3,0,0);                                                        // Allocate new dictionary for the new scope
-  (void)E(q,'}');                                                              // Evaluate until '}' or end-of-stream
+  (void)E(q,'}',0);                                                            // Evaluate until '}' or end-of-stream
   if(**q && 34==t(**q) && '}'==dc(**q)){                                       // If '}' is present, consume it and close the scope.
     (*q)++;
     Q d = SC[csp];
@@ -2873,7 +2892,7 @@ Q eol(Q** q){
   LC[LP] = ')';
   LK[LP] = 0;
   LBASE[LP] = 0;
-  (void)E(q,')');                                                              // Evaluate until ')' or end-of-stream, appending values.
+  (void)E(q,')',1);                                                            // Evaluate until ')' or end-of-stream, appending values.
   if(**q && 34==t(**q) && ')'==dc(**q)){                                       // If ')' is present, consume it and close the list.
     return ecl(q);
   }
@@ -2881,18 +2900,11 @@ Q eol(Q** q){
 }
 
 Q eob(Q** q){
+  // Bracket block: evaluate in the current scope and return the last statement value.
   (*q)++;                                                                      // consume '['
-  if(LP+1 >= 1024) return ac(99);
-  LP++;D clp=LP;
-  NL[LP] = vca(0, 0, 3, 64);
-  LC[LP] = ']';
-  LK[LP] = 0;
-  LBASE[LP] = 0;
-  (void)E(q,']');                                                              // Evaluate until ']' or end-of-stream, appending values.
-  if(**q && 34==t(**q) && ']'==dc(**q)){
-    return ecl(q);
-  }
-  return NL[clp];
+  Q r = E(q,']',0);                                                            // Evaluate until ']' or end-of-stream (no capture).
+  if(**q && 34==t(**q) && ']'==dc(**q)) (*q)++;                                // consume ']'
+  return r;
 }
 
 Q eib(Q base, Q** q){
@@ -2903,7 +2915,7 @@ Q eib(Q base, Q** q){
   LC[LP] = ']';
   LK[LP] = 1;
   LBASE[LP] = base; ir(base);
-  (void)E(q,']');                                                              // Evaluate until ']' or end-of-stream, appending indices.
+  (void)E(q,']',1);                                                            // Evaluate until ']' or end-of-stream, appending indices.
   if(**q && 34==t(**q) && ']'==dc(**q)){
     return ecl(q);                                                             // close + apply index
   }
@@ -2935,6 +2947,107 @@ Q ecl(Q** q){
   return r;
 }
 
+static inline B is_missing(Q q){ return q && 4==t(q) && 0==n(q); }
+static inline B truthy(Q q){
+  if(!q) return 0;
+  if(is_missing(q)) return 0;
+  if(t(q)==T_INT && sh(q)==0) return ra(q)!=0;
+  if(t(q)==T_FLT && sh(q)==0){
+    double x = f64_from_bits(ra(q));
+    return x!=0.0;
+  }
+  return 1;
+}
+
+static inline B is_if_ref(Q q){
+  return q && t(q)==1 && sh(q)==0 && SYM_PAY_IF && ra(q)==SYM_PAY_IF;
+}
+
+static inline Q eval_slice(Q* start, Q* end){
+  Q saved = *end;
+  *end = 0;
+  Q* tp = start;
+  Q r = E(&tp, '\0', 0);
+  *end = saved;
+  return r;
+}
+
+static Q eif(Q** q){
+  // Special-form: if[cond;then;cond;then;...;else]
+  // - Lazy: only the selected branch is evaluated.
+  // - Branch expressions may be blocks via `[...]` (same scope) or `{...}` (new scope).
+  (*q)++; // consume `if`
+  if(!(**q && 34==t(**q) && '['==(C)dc(**q))) return ac(2);
+  (*q)++; // consume '['
+
+  enum { IF_MAX_SEGS = 256 };
+  Q* seg_s[IF_MAX_SEGS];
+  Q* seg_e[IF_MAX_SEGS];
+  D segc = 0;
+
+  Q* start = *q;
+  D depth = 0;
+  for(;;){
+    Q tok = **q;
+    if(!tok) return ac(2); // missing closing ']'
+
+    if(34==t(tok)){
+      C c = (C)dc(tok);
+
+      // Top-level separators split segments.
+      if(depth==0 && (c==';' || c=='\n')){
+        if(segc >= IF_MAX_SEGS) return ac(99);
+        seg_s[segc] = start;
+        seg_e[segc] = *q;
+        segc++;
+        (*q)++; // consume separator
+        while(**q && 34==t(**q) && (((C)dc(**q))==';' || ((C)dc(**q))=='\n')) (*q)++;
+        start = *q;
+        continue;
+      }
+
+      // Track nesting so we don't split inside nested blocks/lists.
+      if(c=='{' || c=='(' || c=='['){ depth++; (*q)++; continue; }
+      if(c=='}' || c==')' || c==']'){
+        if(c==']' && depth==0){
+          if(segc >= IF_MAX_SEGS) return ac(99);
+          seg_s[segc] = start;
+          seg_e[segc] = *q;
+          segc++;
+          (*q)++; // consume ']'
+          break;
+        }
+        if(depth>0) depth--;
+        (*q)++;
+        continue;
+      }
+    }
+
+    (*q)++;
+  }
+
+  if(segc < 2) return ac(2);
+
+  D pair_count = segc / 2;
+  B has_else = (segc & 1) ? 1 : 0;
+
+  for(D i=0;i<pair_count;i++){
+    Q cond = eval_slice(seg_s[i*2], seg_e[i*2]);
+    if(34==t(cond)) return cond;
+    if(truthy(cond)){
+      Q thenv = eval_slice(seg_s[i*2+1], seg_e[i*2+1]);
+      return thenv;
+    }
+  }
+
+  if(has_else){
+    Q elsev = eval_slice(seg_s[segc-1], seg_e[segc-1]);
+    return elsev;
+  }
+
+  return tsna(0,4,1,3,0,0); // missing
+}
+
 Q emv(Q** q){
   Q v=*(*q)++;
   while(18==t(**q)){v=derive_verb(v,*(*q)++);}
@@ -2955,7 +3068,7 @@ Q edv(Q a,Q** q){
   return r;
 }
 
-Q E(Q** q, C tc){
+Q E(Q** q, C tc, B capture){
   Q missing = tsna(0,4,1,3,0,0);                                                  // "missing" sentinel
   Q r = missing;                                                                  // last statement result (or missing)
   D clp=LP;                                                                       // capture the list builder index for this call
@@ -2965,7 +3078,7 @@ Q E(Q** q, C tc){
     if(tc && 34==t(a) && tc==dc(a)) break;
     if(34==t(a) && (';'==dc(a) || '\n'==dc(a))){(*q)++; continue;}                // ignore empty statements
     r=e(q);                                                                        // e() consumes exactly one expression
-    if((tc==')' || tc==']') && !(4==t(r) && 0==n(r))){                              // list capture (skip "missing")
+    if(capture && !(4==t(r) && 0==n(r))){                                          // capture (skip "missing")
       Q v = r;
       if(ip(r) && 0==t(r)){
         Q stack[64];
@@ -3020,6 +3133,22 @@ Q e(Q** q){
     if('}'==c) return ecc(q);
     if(')'==c) return ecl(q);
     if(']'==c) return ecl(q);
+  }
+
+  // Special form: if[cond;then;...;else]
+  if(is_if_ref(a)){
+    Q w0 = (*q)[1];
+    if(w0 && 34==t(w0) && '['==(C)dc(w0)){
+      Q noun = eif(q);
+      if(34==t(noun)) return noun;
+      while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);          // postfix indexing
+
+      Q v = **q;
+      Q w2 = (*q)[1];
+      B end2 = !w2 || (34==t(w2) && (';'==dc(w2) || '\n'==dc(w2) || '}'==dc(w2) || ')'==dc(w2) || ']'==dc(w2)));
+      if(v && 2==t(v) && !end2) return edv(noun, q);
+      return noun;
+    }
   }
 
   Q w=(*q)[1];                                                                   // safe: token streams are 0-terminated
@@ -3227,7 +3356,7 @@ static Q eval_code_tape(const C* src, D len){
   for(;;){
     if(LP>0){
       C tc = LC[LP] ? LC[LP] : ')';
-      r = E(&tokens, tc);
+      r = E(&tokens, tc, 1);
       if(LP>0 && LK[LP]==1 && !(*tokens && 34==t(*tokens) && tc==dc(*tokens))){
         r = apply_index_over(LBASE[LP], NL[LP]);
       }
@@ -3237,7 +3366,7 @@ static Q eval_code_tape(const C* src, D len){
       }
       break;
     }else{
-      Q r2 = E(&tokens, '\0');
+      Q r2 = E(&tokens, '\0', 0);
       if(!(4==t(r2) && 0==n(r2))) r = r2;
       break;
     }
@@ -3585,7 +3714,7 @@ I main(I argc, C** argv){
     for(;;){
       if(LP>0){
         C tc = LC[LP] ? LC[LP] : ')';
-        r = E(&tokens, tc);                                                     // evaluate inside the open builder
+        r = E(&tokens, tc, 1);                                                  // evaluate inside the open builder
         if(LP>0 && LK[LP]==1 && !(*tokens && 34==t(*tokens) && tc==dc(*tokens))){
           r = apply_index_over(LBASE[LP], NL[LP]);                               // show current postfix-index result while unbalanced
         }
@@ -3595,7 +3724,7 @@ I main(I argc, C** argv){
         }
         break;
       }else{
-        Q r2 = E(&tokens,'\0');
+        Q r2 = E(&tokens,'\0',0);
         if(!(4==t(r2) && 0==n(r2))) r = r2;
         break;
       }

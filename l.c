@@ -227,7 +227,7 @@ static inline void commit_range(void* p, Q bytes){
 Q bumpalloc(B t,B s,B z,D n,D c,Q ar){                                                    
   (void)ar;
   Q units=bump_units(z,c);
-  if(AI[0]+units>AC[0]){printf("oom\n");exit(0);}
+  if(AI[0]+units>AC[0]){exit(1);}
   if(AI[0]+units>AM[0]){
     Q req=AI[0]+units;
     commit_range(AB[0]+AM[0]*BUMP_UNIT_QS, (req-AM[0])*BUMP_UNIT_BYTES);
@@ -246,7 +246,7 @@ Q bumpalloc_u(B t,B s,B z,D n,D c,Q ar){
   // Only use when the caller will fully initialize all n elements before any read.
   (void)ar;
   Q units=bump_units(z,c);
-  if(AI[0]+units>AC[0]){printf("oom\n");exit(0);}
+  if(AI[0]+units>AC[0]){exit(1);}
   if(AI[0]+units>AM[0]){
     Q req=AI[0]+units;
     commit_range(AB[0]+AM[0]*BUMP_UNIT_QS, (req-AM[0])*BUMP_UNIT_BYTES);
@@ -270,7 +270,6 @@ void buddyinit(B a){
     if(ord>=32) ord=31;
 
     Q u = buddy_units_from_order(ord);
-    printf("rem ord u %lld %d %lld\n",rem,ord,u);
     commit_range(AB[a] + off * BUDDY_UNIT_QS, sizeof(Q));
     *(Q*)(AB[a] + off * BUDDY_UNIT_QS) = BF[ord];
     BF[ord] = off;
@@ -286,7 +285,7 @@ Q buddyalloc(B t,B s,B z,D n,D c,Q ar){
 
   B i = ord;
   while(i<32 && BF[i]==~0ULL) i++;
-  if(i==32){ printf("oom buddy\n"); exit(0); }
+  if(i==32){ exit(1); }
 
   Q off = BF[i];
   BF[i] = *(Q*)(AB[1] + off * BUDDY_UNIT_QS);
@@ -317,7 +316,7 @@ Q buddyalloc_u(B t,B s,B z,D n,D c,Q ar){
 
   B i = ord;
   while(i<32 && BF[i]==~0ULL) i++;
-  if(i==32){ printf("oom buddy\n"); exit(0); }
+  if(i==32){ exit(1); }
 
   Q off = BF[i];
   BF[i] = *(Q*)(AB[1] + off * BUDDY_UNIT_QS);
@@ -380,7 +379,7 @@ Q filebumpalloc(B t, B s, B z, D n, D c, Q ar) {
         Q new_cap = current_cap_bytes ? current_cap_bytes : (1ULL<<16);
         while (new_cap < new_sz) new_cap *= 2;
         void* new_addr = os_remap((void*)addrs[fid], current_cap_bytes, new_cap, hs[fid]);
-        if (!new_addr) { printf("file: grow failed\n"); return ae(2); }
+        if (!new_addr) { return ae(2); }
         addrs[fid] = (Q)new_addr;
         caps[fid] = new_cap;
     }
@@ -470,16 +469,15 @@ Q Bi(B* b,B z,D i){                                                             
 Q pi(Q q,D i){return Bi(p(q),sz(q),i);}              
 Q ri(Q q,D i){
   if(1==sh(q)){return pi(q,i);}
-  printf("non shape 1 ri call\n");
   return ae(1);                                                                       // shape error
 }
 Q vi(D n,D i){if(i>=n){return ae(2);};return an(i);}
 Q qi(Q q,D i){B s=sh(q),tq=t(q);
-  if(1==s){Q qi=vi(n(q),i);return is_err(qi)?(printf("qi badidx\n"),qi):et(pi(q,di(qi)),tq);};
-  return (printf("non shape 1 qi call\n"),ae(1));
+  if(1==s){Q qi=vi(n(q),i);return is_err(qi)?qi:et(pi(q,di(qi)),tq);};
+  return ae(1);
 }              // get at index, return tagged Q
 Q ra(Q q){                                                                      // read atom
-  if(sh(q)){printf("ra: not an atom\n");return ae(1);}
+  if(sh(q)) return ae(1);
   switch(t(q)){
     case 1:  return ip(q) ? pi(q,0) : di(q);
     case 2:  return ip(q) ? pi(q,0) : (q>>6);                                    // verbs are atoms; payload is the verb id
@@ -550,7 +548,7 @@ void Bid(B* b,B z,D i,Q d){
     default: memcpy(b+z*i, &d, z); return;
   }
 }
-void pid(Q q,D i,Q d){if(n(q)<=i){printf("length error\n");return;};Bid(p(q),sz(q),i,d);}          // throw length error when i outside of n
+void pid(Q q,D i,Q d){if(n(q)<=i){exit(1);return;};Bid(p(q),sz(q),i,d);}          // throw length error when i outside of n
 void zid(Q q,D i,Q d){Q o=pi(q,i);ir(d);pid(q,i,d);dr(o);}
 void qid(Q q,D i,Q d){if(!t(q)){zid(q,i,d);}else{pid(q,i,d);}}
 
@@ -1374,7 +1372,7 @@ Q file_log(Q a, Q w);
 Q file_read_log(Q f);
 
 Q fl(B A, Q v, Q a, Q w){
-  if(t(w)!=6){printf("file: filename must be string\n"); return ae(2);}
+  if(t(w)!=6) return ae(2);
   char fn[256]; D fn_len = n(w); if(fn_len > 255) fn_len = 255;
   for(D i=0; i<fn_len; i++) fn[i] = (char)pi(w,i); fn[fn_len] = 0;
 
@@ -1399,7 +1397,7 @@ Q fl(B A, Q v, Q a, Q w){
   // Map the file.
   Q sz=0, h=0;
   void* map_base = os_map(fn, &sz, &h);
-  if(!map_base) { printf("file: map failed\n"); return ae(2); }
+  if(!map_base) return ae(2);
 
   // Populate the slot.
   Q used = *((Q*)map_base + 1);
@@ -1418,7 +1416,7 @@ Q fl(B A, Q v, Q a, Q w){
 }
 
 Q sv(B A, Q v, Q a, Q w){
-  if(t(a)!=6){printf("save: filename must be string\n"); return ae(2);}
+  if(t(a)!=6) return ae(2);
   char fn[256]; D fn_len = n(a); if(fn_len > 255) fn_len = 255;
   for(D i=0; i<fn_len; i++) fn[i] = (char)pi(a,i); fn[fn_len] = 0;
 
@@ -1428,7 +1426,7 @@ Q sv(B A, Q v, Q a, Q w){
 
   Q sz=0, h=0;
   void* map_base = os_map(fn, &sz, &h);
-  if(!map_base) { printf("file: save failed to map\n"); return ae(2); }
+  if(!map_base) return ae(2);
 
   // Temporarily populate FT to use materialize
   ((Q*)p(FT_addr))[fid] = (Q)map_base;
@@ -1454,9 +1452,9 @@ Q file_read(Q f){
   return root;
 }
 Q ld(B A, Q v, Q a, Q w){
-  if(t(w)!=6){printf("load: filename must be string\n"); return ae(2);}
+  if(t(w)!=6) return ae(2);
   C fn[1024];
-  if(!qstr_to_c(w, fn, (D)sizeof(fn))){printf("load: bad filename\n"); return ae(2);}
+  if(!qstr_to_c(w, fn, (D)sizeof(fn))) return ae(2);
   if(ends_with_dot_l(fn)){
     return eval_code_file(fn);
   }
@@ -1538,7 +1536,7 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 34
+#define VTZ 35
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -1893,7 +1891,7 @@ static inline Q apply_raw(VF* Vtab, Q v, Q a, Q w){
 Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
   B sa=sh(a),sw=sh(w);
   D na=2==sa?n(pi(a,1)):n(a), nw=2==sw?n(pi(w,1)):n(w);
-  if(DB==m && na!=nw && sa && sw){printf("vb length\n");return ae(2);}
+  if(DB==m && na!=nw && sa && sw) return ae(2);
 
   // Force broadcast for explicit adverbs (d>0). For implicit lifting (d<0), only lift on boxed args.
   B ib = d>0 ? 1 : vb_need_for(m, a, w);
@@ -2847,14 +2845,15 @@ Q its(B A,Q v,Q a,Q w){
 Q lg(B A, Q v, Q a, Q w);
 Q rl(B A, Q v, Q a, Q w);
 Q mt(B A, Q v, Q a, Q w);
+Q arena(B A, Q v, Q a, Q w);
 Q mxcsr(B A, Q v, Q a, Q w);
 Q setmxcsr(B A, Q v, Q a, Q w);
 Q ticks(B A, Q v, Q a, Q w);
 Q ev(B A, Q v, Q a, Q w);
 Q bench(B A, Q v, Q a, Q w);
 Q aply(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0};
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -2891,6 +2890,7 @@ static const BM VBM[VTZ]={
   /* 31 */ NB, // bench
   /* 32 */ NB, // eval
   /* 33 */ NB, // apply
+  /* 34 */ NB, // arena
 };
 
 static const BM VBD[VTZ]={
@@ -2928,8 +2928,9 @@ static const BM VBD[VTZ]={
   /* 31 */ NB, // bench
   /* 32 */ NB, // eval
   /* 33 */ NB, // apply
+  /* 34 */ NB, // arena
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -2984,6 +2985,13 @@ Q setmxcsr(B A, Q v, Q a, Q w){
 Q ticks(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a; (void)w;
   return an((J)now_ns_u64());
+}
+
+Q arena(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a; (void)w;
+  printf("AB[0] AC[0] AI[0] %lld %lld %lld\n", (long long)AB[0], (long long)AC[0], (long long)AI[0]);
+  printf("AB[1] AC[1] AI[1] %lld %lld %lld\n", (long long)AB[1], (long long)AC[1], (long long)AI[1]);
+  return tsna(0,4,1,3,0,0); // missing (print-only)
 }
 
 Q ev(B A, Q v, Q a, Q w){
@@ -3760,24 +3768,33 @@ static inline D ascii_adv_id(const C* p){
 
 Q* lx_len(const C* b, D l);
 
-static inline B env_truthy(const char* v){
-  if(!v || !*v) return 0;
-  if(v[0]=='0') return 0;
-  if(v[0]=='1') return 1;
-  if(v[0]=='y' || v[0]=='Y') return 1;
-  if(v[0]=='t' || v[0]=='T') return 1;
-  return 0;
+typedef struct {
+  B dbg_startup;
+  B dump_tokens;
+} L_Opts;
+static L_Opts L_opts = {0,0};
+
+static void print_usage(void){
+  printf("usage: l [--dbg-startup] [--dump-tokens] [script.l]\n");
 }
-static inline B env_flag_on(const char* name){
-  const char* v = getenv(name);
-  return env_truthy(v);
+
+static void parse_args(I argc, C** argv, const C** script_out, B* usage_out){
+  if(script_out) *script_out = 0;
+  if(usage_out) *usage_out = 0;
+  for(I i=1;i<argc;i++){
+    const C* a = argv[i];
+    if(!a || !*a) continue;
+    if(0==strcmp(a, "--dbg-startup")){ L_opts.dbg_startup = 1; continue; }
+    if(0==strcmp(a, "--dump-tokens")){ L_opts.dump_tokens = 1; continue; }
+    if(0==strcmp(a, "-h") || 0==strcmp(a, "--help")){ if(usage_out) *usage_out = 1; continue; }
+    if(a[0]=='-'){ if(usage_out) *usage_out = 1; continue; }
+    if(script_out && !*script_out){ *script_out = a; continue; }
+    if(usage_out) *usage_out = 1;
+  }
 }
 
 static inline void dbg_write_startup(const char* s){
-  static B init = 0;
-  static B on = 0;
-  if(!init){ on = env_flag_on("L_DBG_STARTUP"); init = 1; }
-  if(!on || !s) return;
+  if(!L_opts.dbg_startup || !s) return;
 #if defined(_WIN32)
   HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
   if(!h || h==INVALID_HANDLE_VALUE) return;
@@ -3797,10 +3814,7 @@ static void dump_token_tape(Q* toks){
   }
 }
 static inline B dump_tokens_enabled(void){
-  static B init = 0;
-  static B on = 0;
-  if(!init){ on = env_flag_on("L_DUMP_TOKENS"); init = 1; }
-  return on;
+  return L_opts.dump_tokens;
 }
 
 static Q eval_code_tape(const C* src, D len){
@@ -3839,7 +3853,7 @@ static Q eval_code_file(const char* fn){
   if(!fn) return ae(2);
   Q sz=0, h=0;
   void* addr = os_map_ro((char*)fn, &sz, &h);
-  if(!addr) { printf("load: map failed: %s\n", fn); return ae(2); }
+  if(!addr) return ae(2);
   dbg_write_startup("dbg: eval_code_file mapped\n");
   Q r = (addr==(void*)1) ? 0 : eval_code_tape((const C*)addr, (D)sz);
   dbg_write_startup("dbg: eval_code_file tape done\n");
@@ -4128,6 +4142,10 @@ static C* read_line(FILE* in){
 }
 
 I main(I argc, C** argv){
+  const C* script = 0;
+  B usage = 0;
+  parse_args(argc, argv, &script, &usage);
+  if(usage) print_usage();
   dbg_write_startup("dbg: main start\n");
 #if defined(_WIN32)
   {
@@ -4139,15 +4157,13 @@ I main(I argc, C** argv){
       SetConsoleOutputCP(65001);
     }
   }
-  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){printf("VA 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
-  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){printf("VA 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
+  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
+  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #else
-  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){printf("mmap 0 failed\n");exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
-  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){printf("mmap 1 failed\n");exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
+  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
+  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 #endif
   dbg_write_startup("dbg: arenas reserved\n");
-  printf("AB[0] AC[0] AI[0] %lld %lld %lld\n",(long long)AB[0],AC[0],AI[0]);
-  printf("AB[1] AC[1] AI[1] %lld %lld %lld\n",(long long)AB[1],AC[1],AI[1]);
   buddyinit(1);
   dbg_write_startup("dbg: buddyinit done\n");
   FT_addr = vca(1, 3, 3, 4096);
@@ -4181,12 +4197,12 @@ I main(I argc, C** argv){
   stdin_is_console = isatty(fileno(stdin)) ? 1 : 0;
 #endif
 
-  if(argc > 1){
-    if(!ends_with_dot_l(argv[1])){
-      printf("usage: l script.l\n");
+  if(script){
+    if(!ends_with_dot_l(script)){
+      print_usage();
     }else{
       dbg_write_startup("dbg: eval_code_file start\n");
-      Q r = eval_code_file(argv[1]);
+      Q r = eval_code_file(script);
       dbg_write_startup("dbg: eval_code_file done\n");
       pr(r);printf("\n");
     }

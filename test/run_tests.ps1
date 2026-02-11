@@ -12,6 +12,7 @@ function Invoke-LangScript([string]$scriptPath, [string]$expectedLastValue) {
 
   $lines = $out | Where-Object { $_ -ne $null } | ForEach-Object { $_.TrimEnd() }
   $lines = $lines | Where-Object { $_.Trim() -ne "" -and $_ -ne " " }
+  $lines = @($lines)
   if ($lines.Count -eq 0) { throw "No output for $scriptPath" }
 
   $last = $lines[-1].Trim()
@@ -29,9 +30,10 @@ function Invoke-LangScriptExpectNoValue([string]$scriptPath) {
 
   $lines = $out | Where-Object { $_ -ne $null } | ForEach-Object { $_.TrimEnd() }
   $lines = $lines | Where-Object { $_.Trim() -ne "" -and $_ -ne " " }
+  $lines = @($lines)
 
   # Filter interpreter startup diagnostics so we only assert on user-level output.
-  $userLines = $lines | Where-Object { $_ -notmatch '^AB\[' -and $_ -notmatch '^rem ord' }
+  $userLines = @($lines | Where-Object { $_ -notmatch '^AB\[' -and $_ -notmatch '^rem ord' })
 
   if ($userLines.Count -ne 0) {
     $last = $userLines[-1].Trim()

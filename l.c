@@ -47,6 +47,11 @@ typedef Q(*VF)(B,Q,Q,Q);                                                        
 #define T_FLT   8
 #define T_TAG   10
 #define T_LAMBDA 11
+// Grammatical immediates (low 4 bits == 2; t() returns low 6 bits):
+#define T_VERB  2
+#define T_ADV   18
+#define T_CTL   34
+#define T_ERR   50
 
 // Symbol payload tagging (within the 60-bit immediate payload or 64-bit vector element):
 // - LSB==1 => interned symbol id (payload>>1 is the id/index into symtab)
@@ -110,11 +115,13 @@ Q di(Q q){return q>>4;}                                                       //
 Q dv(Q q){return q>>6;}                                                       // verbs are grammatical type, subtype 0. payload in high 59 bits
 Q da(Q q){return q>>6;}
 Q dc(Q q){return q>>6;}                                                       // controls are grammatical type, subtype 2. payload in high 59 bits
+Q de(Q q){return q>>6;}                                                       // errors are grammatical type, subtype 3. payload in high 59 bits
 
 Q ar(Q r){return (r<<4)|1;}                                                   // create an atom of type 1 (reference)
 Q av(Q v){return (v<<6)|2;}                                                   // create a verb atom (grammatical type 2, subtype 0)
 Q aa(Q a){return (a<<6)|(1<<4)|2;}                                            // create an adverb atom (grammatical type 2, subtype 1)
 Q ac(Q c){return (c<<6)|(2<<4)|2;}                                            // create a control atom (grammatical type 2, subtype 2)
+Q ae(Q e){return (e<<6)|(3<<4)|2;}                                            // create an error atom (grammatical type 2, subtype 3)
 Q an(J n){                                                                    // create an atom of type 3 (signed 60-bit immediate integer)
   if(n >= -(1LL<<59) && n < (1LL<<59)){
     Q payload = ((Q)n) & ((1ULL<<60)-1ULL);
@@ -128,7 +135,7 @@ Q ach(C c){return ((Q)(B)c<<4)|6;}                                            //
 Q as(Q s){return (s<<4)|7;}                                                   // create an atom of type 7 (symbol)
 Q atg(Q x){return (x<<4)|T_TAG;}                                              // create an atom of type 10 (tag64)
 Q aA(B a, D f){return (((Q)f<<8)|a)<<4|9;}                                    // create an atom of type 9 (arena/file)
-Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach(q):7==t?as(q):8==t?af_bits(0,q):T_TAG==t?atg(q):ac(q);} // encode data of an atom based on the type. TODO: handle 9
+Q et(Q q,B t){return 0==t?q:1==t?ar(q):2==t?av(q):3==t?an(q):4==t?ap(q):6==t?ach(q):7==t?as(q):8==t?af_bits(0,q):T_TAG==t?atg(q):T_ERR==t?ae(q):ac(q);} // encode data of an atom based on the type. TODO: handle 9
 
 #define AR_ID(x) ((x)&0xFF)
 #define AR_FID(x) ((x)>>8)
@@ -141,6 +148,8 @@ B t(Q q){                                                                     //
   if(tag==2)return q&63;
   return tag;
 }
+static inline B is_err(Q q){ return q && t(q)==T_ERR; }
+static inline B is_ctl(Q q){ return q && t(q)==T_CTL; }
 B sh(Q q){return ii(q)?0:ptr(q)[1];}                                           // shape    from header
 B ls(Q q){return ii(q)?3:ptr(q)[2];}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
 B sz(Q q){return 1<<ls(q);}                                                    // bytesz   from logeltsz
@@ -371,7 +380,7 @@ Q filebumpalloc(B t, B s, B z, D n, D c, Q ar) {
         Q new_cap = current_cap_bytes ? current_cap_bytes : (1ULL<<16);
         while (new_cap < new_sz) new_cap *= 2;
         void* new_addr = os_remap((void*)addrs[fid], current_cap_bytes, new_cap, hs[fid]);
-        if (!new_addr) { printf("file: grow failed\n"); return ac(2); }
+        if (!new_addr) { printf("file: grow failed\n"); return ae(2); }
         addrs[fid] = (Q)new_addr;
         caps[fid] = new_cap;
     }
@@ -462,15 +471,15 @@ Q pi(Q q,D i){return Bi(p(q),sz(q),i);}
 Q ri(Q q,D i){
   if(1==sh(q)){return pi(q,i);}
   printf("non shape 1 ri call\n");
-  return ac(1);                                                                       // shape error
+  return ae(1);                                                                       // shape error
 }
-Q vi(D n,D i){if(i>=n){return ac(2);};return an(i);}
+Q vi(D n,D i){if(i>=n){return ae(2);};return an(i);}
 Q qi(Q q,D i){B s=sh(q),tq=t(q);
-  if(1==s){Q qi=vi(n(q),i);return 34==t(qi)?(printf("qi badidx\n"),qi):et(pi(q,di(qi)),tq);};
-  return (printf("non shape 1 qi call\n"),ac(1));
+  if(1==s){Q qi=vi(n(q),i);return is_err(qi)?(printf("qi badidx\n"),qi):et(pi(q,di(qi)),tq);};
+  return (printf("non shape 1 qi call\n"),ae(1));
 }              // get at index, return tagged Q
 Q ra(Q q){                                                                      // read atom
-  if(sh(q)){printf("ra: not an atom\n");return ac(1);}
+  if(sh(q)){printf("ra: not an atom\n");return ae(1);}
   switch(t(q)){
     case 1:  return ip(q) ? pi(q,0) : di(q);
     case 2:  return ip(q) ? pi(q,0) : (q>>6);                                    // verbs are atoms; payload is the verb id
@@ -479,9 +488,10 @@ Q ra(Q q){                                                                      
     case 7:  return ip(q) ? pi(q,0) : di(q);
     case 8:  return ip(q) ? pi(q,0) : di(q);                                     // float payload bits (heap atoms only today)
     case T_TAG: return ip(q) ? pi(q,0) : di(q);
-    case 18: return ip(q) ? pi(q,0) : (q>>6);
-    case 34: return ip(q) ? pi(q,0) : (q>>6);
-    default: return ac(5);                                                      // not yet implemented
+    case T_ADV: return ip(q) ? pi(q,0) : (q>>6);
+    case T_CTL: return ip(q) ? pi(q,0) : (q>>6);
+    case T_ERR: return ip(q) ? pi(q,0) : (q>>6);
+    default: return ae(5);                                                      // not yet implemented
   }
 }
 static inline D grow_cap_default(D old_cap, D need){
@@ -495,7 +505,7 @@ static inline D grow_cap_default(D old_cap, D need){
 }
 
 Q grow(Q q, D need_n){
-  if(!ip(q) || sh(q)!=1) return ac(1);
+  if(!ip(q) || sh(q)!=1) return ae(1);
 
   Q* h = ptr(q);
   B tq = (B)h[0], sq = (B)h[1], zq = (B)h[2];
@@ -504,7 +514,7 @@ Q grow(Q q, D need_n){
   if(tq==5){
     // Hash tables depend on the probe mask (capacity). Growing requires rehashing with the keys.
     // Do not attempt to resize here; dict-level code should rebuild ht+rehash.
-    return ac(6);
+    return ae(6);
   }
 
   D new_c = grow_cap_default(old_c, need_n);
@@ -523,7 +533,7 @@ Q grow(Q q, D need_n){
 }
 
 Q xn(Q q, D add){
-  if(!ip(q) || sh(q)!=1) return ac(1);
+  if(!ip(q) || sh(q)!=1) return ae(1);
   D old_n = n(q);
   D need_n = old_n + add;
   D c = cp(q);
@@ -635,7 +645,7 @@ static inline D bucket_from_hash(Q h, D lc){
 
 static Q dict_rehash(Q d, D new_cap);
 static inline Q dict_ensure_ht(Q d, D want_keys){
-  if(!ip(d) || 2!=sh(d)) return ac(1);
+  if(!ip(d) || 2!=sh(d)) return ae(1);
   Q htq = pi(d,0), kq = pi(d,1);
   D key_n = n(kq);
   if(want_keys < key_n) want_keys = key_n;
@@ -691,7 +701,7 @@ B LSEP[1024];
 Q dki(Q d, Q k){                                                                // inner "dictionary key" lookup for a single dictionary
   if(!ip(d)||2!=sh(d)) return 0;                                                // Not a dictionary
   Q ok = dict_ensure_ht(d, n(pi(d,1)));
-  if(34==t(ok)) return ok;
+  if(is_err(ok)) return ok;
   Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
   Q* ht=(Q*)p(htq); D c=cp(htq);
   Q h = qhash64(k);
@@ -720,10 +730,10 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth);
 
 static inline B is_nf(Q q){ return 34==t(q) && dc(q)==4; }
 static inline B is_fatal_clone_control(Q q){
+  if(is_err(q)) return 1;
   if(34!=t(q)) return 0;
   Q code = dc(q);
-  // Controls serve double-duty: grammar tokens (e.g. '[', ';', '\n') and error sentinels (small numeric codes).
-  // Cloning should only treat non-grammar sentinel controls as fatal.
+  // Controls are grammar tokens (e.g. '[', ';', '\n') plus a few runtime sentinels like nf.
   if(code==4) return 0;                 // nf is a normal value
   if(code=='\n' || code==';') return 0; // statement separators are safe to embed (e.g. in lambda bodies)
   if(code>=32 && code<=126) return 0;   // printable ASCII controls are grammar tokens
@@ -736,8 +746,8 @@ static inline Q clone0_for_embed0(Q q, Q dest_ar, Q* stack, D depth){
   if(!ip(q)) return q;
   B tq = t(q);
   if(tq!=0 && tq!=T_LAMBDA) return q;
-  if(depth >= 64) return ac(99);
-  for(D i=0;i<depth;i++) if(stack[i]==q) return ac(2);                           // cycle detected
+  if(depth >= 64) return ae(99);
+  for(D i=0;i<depth;i++) if(stack[i]==q) return ae(2);                           // cycle detected
   stack[depth]=q;
   if(tq==T_LAMBDA) return clone_lambda_for_embed(q, dest_ar, stack, depth+1);
   return clone0_for_embed(q, dest_ar, stack, depth+1);
@@ -774,7 +784,7 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
     zid(d2, 1, k2);
     zid(d2, 2, v2);
     Q r = dict_rehash(d2, dict_hash_cap_for_keys(n(k2)));
-    if(34==t(r)) return r;
+    if(is_err(r)) return r;
     return d2;
   }
 
@@ -792,11 +802,11 @@ static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
     return r;
   }
 
-  return ac(1);                                                                   // unsupported shape
+  return ae(1);                                                                   // unsupported shape
 }
 
 static inline Q clone_lambda_for_embed(Q q, Q dest_ar, Q* stack, D depth){
-  if(!ip(q) || t(q)!=T_LAMBDA || sh(q)!=1 || n(q)!=2) return ac(1);
+  if(!ip(q) || t(q)!=T_LAMBDA || sh(q)!=1 || n(q)!=2) return ae(1);
   Q params = pi(q, 0);
   Q body = pi(q, 1);
 
@@ -814,13 +824,13 @@ static inline Q clone_lambda_for_embed(Q q, Q dest_ar, Q* stack, D depth){
 Q dkv(Q d,Q k,Q v){
   Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
   Q ok = dict_ensure_ht(d, n(kq) + 1);
-  if(34==t(ok)) return ok;
+  if(is_err(ok)) return ok;
   htq=pi(d,0);kq=pi(d,1);vq=pi(d,2);
   Q* ht=(Q*)p(htq);
   D c=cp(htq);
   Q h = qhash64(k);
   D i=fk_h(ht,k,h,c,kq);
-  if(i==c){return ac(6);}
+  if(i==c){return ae(6);}
   Q e=ht[i];
   if(e){                                                                      // overwrite existing value
     D idx=idx32_from_entry(e)-1;
@@ -831,9 +841,9 @@ Q dkv(Q d,Q k,Q v){
     return v;
   }
   D idx = n(kq);                                                              // insert new key/value
-  Q kq2 = xn(kq,1); if(34==t(kq2)) return kq2; if(kq2!=kq){ zid(d,1,kq2); kq=kq2; }
+  Q kq2 = xn(kq,1); if(is_err(kq2)) return kq2; if(kq2!=kq){ zid(d,1,kq2); kq=kq2; }
   zid(kq, idx, k);                                                            // append key
-  Q vq2 = xn(vq,1); if(34==t(vq2)) return vq2; if(vq2!=vq){ zid(d,2,vq2); vq=vq2; }
+  Q vq2 = xn(vq,1); if(is_err(vq2)) return vq2; if(vq2!=vq){ zid(d,2,vq2); vq=vq2; }
   qid(vq, idx, v);                                                            // append value
   ht[i] = ((Q)fp32_from_hash(h) << 32) | (Q)(idx + 1);                        // write hash entry (fp32|idx32+1)
   // Track number of active hash entries in the ht header (capacity remains fixed).
@@ -842,7 +852,7 @@ Q dkv(Q d,Q k,Q v){
 }
 
 static Q dict_rehash(Q d, D new_cap){
-  if(!ip(d) || 2!=sh(d)) return ac(1);
+  if(!ip(d) || 2!=sh(d)) return ae(1);
   Q kq = pi(d,1);
   D key_n = n(kq);
   D need = dict_hash_cap_for_keys(key_n);
@@ -858,7 +868,7 @@ static Q dict_rehash(Q d, D new_cap){
     Q h = qhash64(key);
     D fp = fp32_from_hash(h);
     D slot = (D)fk_h(ht, key, h, new_cap, kq);
-    if(slot == new_cap) return ac(6);
+    if(slot == new_cap) return ae(6);
     ht[slot] = ((Q)fp << 32) | (Q)(idx + 1);
   }
   ptr(ht_new)[4] = (Q)key_n;
@@ -870,7 +880,7 @@ static inline Q sym_intern_bytes(const C* bytes, D len);
 static void ft_refresh_dict(){
   if(!G) return;
   Q ft = dk(G, sym_intern_bytes("FT", 2));
-  if(34==t(ft)) return;
+  if(is_err(ft) || is_nf(ft)) return;
   dkv(ft, sym_intern_bytes("addr", 4), FT_addr);
   dkv(ft, sym_intern_bytes("sz",   2), FT_sz);
   dkv(ft, sym_intern_bytes("cap",  3), FT_cap);
@@ -923,7 +933,7 @@ Q q2a_dict(Q dest_ar, Q q) {
     zid(res, 1, k); // keys
     zid(res, 2, v); // values
     Q r = dict_rehash(res, dict_hash_cap_for_keys(n(k)));
-    if(34==t(r)) return r;
+    if(is_err(r)) return r;
     return res;
 }
 
@@ -951,7 +961,14 @@ Q q2a(Q dest_ar, Q q) {
     D dest_fid = AR_FID(dest_ar);
 
     if (!ip(q)) {
-        return (dest_a == 2) ? heap_atom_from(dest_ar, q) : q;
+        if(dest_a == 2){
+          // Keep control/errors as immediates even when materializing into file arena.
+          // (They are sentinel values; persisting them as heap atoms just adds ambiguity.)
+          B tq = t(q);
+          if(tq==T_CTL || tq==T_ERR) return q;
+          return heap_atom_from(dest_ar, q);
+        }
+        return q;
     }
 
     if (ha(q) == dest_a) {
@@ -1025,7 +1042,7 @@ static B symmap_lookup_id(Q symmap, const C* bytes, D len, D* out_id){
   if(!out_id) return 0;
   if(!symmap || !ip(symmap) || sh(symmap)!=2) return 0;
   Q ok = dict_ensure_ht(symmap, n(pi(symmap,1)));
-  if(34==t(ok)) return 0;
+  if(is_err(ok)) return 0;
 
   Q htq=pi(symmap,0), kq=pi(symmap,1), vq=pi(symmap,2);
   Q* ht=(Q*)p(htq);
@@ -1079,7 +1096,7 @@ static void sym_init(void){
     memcpy(p(name), "symtab", 6);
     D idx = n(SYM_TAB);
     Q tab2 = xn(SYM_TAB, 1);
-    if(34!=t(tab2)){
+    if(!is_err(tab2)){
       if(tab2!=SYM_TAB) SYM_TAB = tab2;
       zid(SYM_TAB, idx, name);
       dkv(SYM_MAP, name, an((J)idx));
@@ -1091,7 +1108,7 @@ static void sym_init(void){
     memcpy(p(name), "symmap", 6);
     D idx = n(SYM_TAB);
     Q tab2 = xn(SYM_TAB, 1);
-    if(34!=t(tab2)){
+    if(!is_err(tab2)){
       if(tab2!=SYM_TAB) SYM_TAB = tab2;
       zid(SYM_TAB, idx, name);
       dkv(SYM_MAP, name, an((J)idx));
@@ -1107,7 +1124,7 @@ static void sym_init(void){
     memcpy(p(name), "if", 2);
     D idx = n(SYM_TAB);
     Q tab2 = xn(SYM_TAB, 1);
-    if(34!=t(tab2)){
+    if(!is_err(tab2)){
       if(tab2!=SYM_TAB) SYM_TAB = tab2;
       zid(SYM_TAB, idx, name);
       dkv(SYM_MAP, name, an((J)idx));
@@ -1138,7 +1155,7 @@ static inline Q sym_intern_bytes(const C* bytes, D len){
 
   D idx = n(SYM_TAB);
   Q tab2 = xn(SYM_TAB, 1);
-  if(34==t(tab2)) return tab2;
+  if(is_err(tab2)) return tab2;
   if(tab2 != SYM_TAB){
     SYM_TAB = tab2;
     dkv(G, SYM_K_TAB, SYM_TAB);
@@ -1357,7 +1374,7 @@ Q file_log(Q a, Q w);
 Q file_read_log(Q f);
 
 Q fl(B A, Q v, Q a, Q w){
-  if(t(w)!=6){printf("file: filename must be string\n"); return ac(2);}
+  if(t(w)!=6){printf("file: filename must be string\n"); return ae(2);}
   char fn[256]; D fn_len = n(w); if(fn_len > 255) fn_len = 255;
   for(D i=0; i<fn_len; i++) fn[i] = (char)pi(w,i); fn[fn_len] = 0;
 
@@ -1382,7 +1399,7 @@ Q fl(B A, Q v, Q a, Q w){
   // Map the file.
   Q sz=0, h=0;
   void* map_base = os_map(fn, &sz, &h);
-  if(!map_base) { printf("file: map failed\n"); return ac(2); }
+  if(!map_base) { printf("file: map failed\n"); return ae(2); }
 
   // Populate the slot.
   Q used = *((Q*)map_base + 1);
@@ -1401,7 +1418,7 @@ Q fl(B A, Q v, Q a, Q w){
 }
 
 Q sv(B A, Q v, Q a, Q w){
-  if(t(a)!=6){printf("save: filename must be string\n"); return ac(2);}
+  if(t(a)!=6){printf("save: filename must be string\n"); return ae(2);}
   char fn[256]; D fn_len = n(a); if(fn_len > 255) fn_len = 255;
   for(D i=0; i<fn_len; i++) fn[i] = (char)pi(a,i); fn[fn_len] = 0;
 
@@ -1411,7 +1428,7 @@ Q sv(B A, Q v, Q a, Q w){
 
   Q sz=0, h=0;
   void* map_base = os_map(fn, &sz, &h);
-  if(!map_base) { printf("file: save failed to map\n"); return ac(2); }
+  if(!map_base) { printf("file: save failed to map\n"); return ae(2); }
 
   // Temporarily populate FT to use materialize
   ((Q*)p(FT_addr))[fid] = (Q)map_base;
@@ -1437,14 +1454,14 @@ Q file_read(Q f){
   return root;
 }
 Q ld(B A, Q v, Q a, Q w){
-  if(t(w)!=6){printf("load: filename must be string\n"); return ac(2);}
+  if(t(w)!=6){printf("load: filename must be string\n"); return ae(2);}
   C fn[1024];
-  if(!qstr_to_c(w, fn, (D)sizeof(fn))){printf("load: bad filename\n"); return ac(2);}
+  if(!qstr_to_c(w, fn, (D)sizeof(fn))){printf("load: bad filename\n"); return ae(2);}
   if(ends_with_dot_l(fn)){
     return eval_code_file(fn);
   }
   Q f = fl(A,v,0,w);
-  if(t(f)==34 && dc(f)==2) return f;
+  if(is_err(f)) return f;
   return file_read(f);
 }
 Q file_append(Q a, Q w){
@@ -1613,6 +1630,17 @@ static inline void pr_control_ascii(Q q){
   pr(q);
 }
 
+static inline const char* err_name(Q code){
+  switch(code){
+    case 1:  return "shape";
+    case 2:  return "type";
+    case 5:  return "nyi";
+    case 6:  return "hash";
+    case 99: return "limit";
+    default: return 0;
+  }
+}
+
 static void pr_lambda_roundtrip(Q lam);
 
 static inline void pr_verb_roundtrip(Q v){
@@ -1708,12 +1736,20 @@ void pr(Q q){
   if(T_LAMBDA==t(q)){
     pr_lambda_roundtrip(q);
   }
-  if(34==t(q)){
+  if(T_ERR==t(q)){
+    Q code = de(q);
+    const char* name = err_name(code);
+    if(name) printf("err:%s", name);
+    else printf("err:%llu", (unsigned long long)code);
+    return;
+  }
+  if(T_CTL==t(q)){
     Q code = dc(q);
-    if(code==2){ printf("qi"); return; }                                         // generic error
     if(code==4){ printf("nf"); return; }                                         // not found
-    if(code>=32 && code<=126){ printf("control:%c",(char)code); return; }
-    printf("control:%llu",(unsigned long long)code);
+    if(code=='\n'){ printf("ctl:\\n"); return; }
+    if(code==';'){ printf("ctl:;"); return; }
+    if(code>=32 && code<=126){ printf("ctl:%c",(char)code); return; }
+    printf("ctl:%llu",(unsigned long long)code);
     return;
   }
   if(9==t(q)){printf("file:%d", (int)AR_FID(di(q)));}
@@ -1811,7 +1847,7 @@ static inline Q vb_rebuild_dict(B A, Q d, Q new_vals){
   zid(zd,1,kc);
   zid(zd,2,new_vals);
   Q r = dict_rehash(zd, dict_hash_cap_for_keys(n(kc)));
-  if(34==t(r)) return r;
+  if(is_err(r)) return r;
   return zd;
 }
 
@@ -1845,17 +1881,19 @@ static inline void decode_derived_verb(Q v, Q* base_out, D* adv_idx_out){
 }
 
 static inline Q apply_raw(VF* Vtab, Q v, Q a, Q w){
+  if(is_err(a)) return a;
+  if(is_err(w)) return w;
   Q r=dv(v);
-  if(r<(Q)VTZ) return Vtab && Vtab[r] ? Vtab[r](0, v, a, w) : ac(2);
+  if(r<(Q)VTZ) return Vtab && Vtab[r] ? Vtab[r](0, v, a, w) : ae(2);
   Q b=0; D idx=0;
   decode_derived_verb(v, &b, &idx);
-  return AV[idx] ? AV[idx](0, b, a, w) : ac(2);
+  return AV[idx] ? AV[idx](0, b, a, w) : ae(2);
 }
 
 Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
   B sa=sh(a),sw=sh(w);
   D na=2==sa?n(pi(a,1)):n(a), nw=2==sw?n(pi(w,1)):n(w);
-  if(DB==m && na!=nw && sa && sw){printf("vb length\n");return ac(2);}
+  if(DB==m && na!=nw && sa && sw){printf("vb length\n");return ae(2);}
 
   // Force broadcast for explicit adverbs (d>0). For implicit lifting (d<0), only lift on boxed args.
   B ib = d>0 ? 1 : vb_need_for(m, a, w);
@@ -1875,7 +1913,7 @@ Q vb(B A,Q v,Q a,Q w,BM m,I d){ // arena verb alpha omega broadcast mode depth
     }else{
       zi = (MB==m) ? apply_raw(VM, v, 0, wi) : apply_raw(VD, v, ai, wi);
     }    
-    if(34==t(zi)) return zi;
+    if(is_err(zi)) return zi;
     zid(z,i,zi);
   }
   if(2==sa) return vb_rebuild_dict(A, a, z);
@@ -2230,7 +2268,7 @@ static Q k_bxor_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_mod_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0){
-    J y=(J)num_int_bits_atom(w); if(!y) return ac(2);
+    J y=(J)num_int_bits_atom(w); if(!y) return ae(2);
     return an(floormod_j((J)num_int_bits_atom(a), y));
   }
   Q z=vne_u(0, T_INT, 3, nz);
@@ -2241,7 +2279,7 @@ static Q k_mod_i(Q a,Q w,B sa,B sw,D nz){
   Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
     J y = (J)(sw ? wp[i] : wx0);
-    if(!y) return ac(2);
+    if(!y) return ae(2);
     J x = (J)(sa ? ap[i] : ax0);
     out[i] = (Q)floormod_j(x, y);
   }
@@ -2249,7 +2287,7 @@ static Q k_mod_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_floordiv_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0){
-    J y=(J)num_int_bits_atom(w); if(!y) return ac(2);
+    J y=(J)num_int_bits_atom(w); if(!y) return ae(2);
     return an(floordiv_j((J)num_int_bits_atom(a), y));
   }
   Q z=vne_u(0, T_INT, 3, nz);
@@ -2260,7 +2298,7 @@ static Q k_floordiv_i(Q a,Q w,B sa,B sw,D nz){
   Q wx0 = sw ? 0 : num_int_bits_atom(w);
   for(D i=0;i<nz;i++){
     J y = (J)(sw ? wp[i] : wx0);
-    if(!y) return ac(2);
+    if(!y) return ae(2);
     J x = (J)(sa ? ap[i] : ax0);
     out[i] = (Q)floordiv_j(x, y);
   }
@@ -2430,19 +2468,19 @@ static inline NumKernel kernel_cmp_i64(NOP op){ return (op>=0 && op<NOP__N) ? K_
 
 static Q num_binop(NOP op, Q a, Q w){
   const NumOpSpec* sp = numop_spec(op);
-  if(!sp) return ac(2);
+  if(!sp) return ae(2);
 
   B ta=t(a), tw=t(w);
   if(sp->require_int){
-    if(ta!=T_INT || tw!=T_INT) return ac(2);
+    if(ta!=T_INT || tw!=T_INT) return ae(2);
   }else{
-    if(!is_num_type(ta) || !is_num_type(tw)) return ac(2);
+    if(!is_num_type(ta) || !is_num_type(tw)) return ae(2);
   }
 
   B sa=sh(a), sw=sh(w);
-  if(sa>1 || sw>1) return ac(1);
+  if(sa>1 || sw>1) return ae(1);
   D na=n(a), nw=n(w);
-  if(sa==1 && sw==1 && na!=nw) return ac(2);
+  if(sa==1 && sw==1 && na!=nw) return ae(2);
 
   D nz = (sa==1) ? na : (sw==1) ? nw : 1;
 
@@ -2458,14 +2496,14 @@ static Q num_binop(NOP op, Q a, Q w){
   }else{
     k = kernel_i64(op);
   }
-  return k ? k(a, w, sa, sw, nz) : ac(2);
+  return k ? k(a, w, sa, sw, nz) : ae(2);
 }
 
 static Q int_bit_not(Q w){
-  if(t(w)!=T_INT) return ac(2);
+  if(t(w)!=T_INT) return ae(2);
   B sw=sh(w);
   if(sw==0) return an((J)(~num_int_bits_atom(w)));
-  if(sw!=1) return ac(1);
+  if(sw!=1) return ae(1);
   D nw=n(w);
   Q z=vne_u(0, T_INT, 3, nw);
   Q* out = (Q*)p(z);
@@ -2475,13 +2513,13 @@ static Q int_bit_not(Q w){
 
 Q nt(B A,Q v,Q a,Q w){
   (void)A; (void)v; (void)a;
-  if(!is_num_type(t(w))) return ac(2);
+  if(!is_num_type(t(w))) return ae(2);
   B sw=sh(w);
   if(sw==0){
     if(t(w)==T_FLT) return an(num_f64_atom(w)==0.0);
     return an((J)(num_int_bits_atom(w)==0));
   }
-  if(sw!=1) return ac(1);
+  if(sw!=1) return ae(1);
   D nw=n(w);
   Q z=vne_u(0, T_INT, 3, nw);
   Q* out = (Q*)p(z);
@@ -2510,7 +2548,7 @@ Q at(B A,Q v,Q a,Q w){
   if(ip(a) && t(a)==0 && sh(a)==2){
     if(ii(w)){
       Q r = dki(a, w);
-      if(34==t(r)) return r;
+      if(is_err(r)) return r;
       return r ? r : ac(4);
     }
     if(sh(w)==1){
@@ -2519,20 +2557,20 @@ Q at(B A,Q v,Q a,Q w){
       for(D i=0;i<nw;i++){
         Q ki = qi(w, i);
         Q r = dki(a, ki);
-        if(34==t(r)) return r;
+        if(is_err(r)) return r;
         zid(z, i, r ? r : ac(4));
       }
       return z;
     }
-    return ac(1);
+    return ae(1);
   }
 
   // Lambda introspection: lam@0 => params, lam@1 => body
   if(ip(a) && t(a)==T_LAMBDA && sh(a)==1 && n(a)==2){
     if(ii(w)){
-      if(t(w)!=T_INT) return ac(2);
+      if(t(w)!=T_INT) return ae(2);
       J idx = (J)ra(w);
-      if(idx<0 || idx>1) return ac(2);
+      if(idx<0 || idx>1) return ae(2);
       return pi(a, (D)idx);
     }
     if(sh(w)==1){
@@ -2540,14 +2578,14 @@ Q at(B A,Q v,Q a,Q w){
       Q z = ln(nw);
       for(D i=0;i<nw;i++){
         Q wi = qi(w, i);
-        if(t(wi)!=T_INT) return ac(2);
+        if(t(wi)!=T_INT) return ae(2);
         J idx = (J)ra(wi);
-        if(idx<0 || idx>1) return ac(2);
+        if(idx<0 || idx>1) return ae(2);
         zid(z, i, pi(a, (D)idx));
       }
       return z;
     }
-    return ac(1);
+    return ae(1);
   }
 
   B aa=ii(a),aw=ii(w);B nz=n(w);
@@ -2578,7 +2616,7 @@ Q idv(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_FLOORDIV, a, w); 
 static inline Q atom_payload_for_match(Q q){
   if(ip(q)) return pi(q, 0);
   B tq = t(q);
-  if(tq==2 || tq==18 || tq==34) return q>>6; // grammatical atoms store payload above bit 6
+  if(tq==2 || tq==18 || tq==34 || tq==T_ERR) return q>>6; // grammatical atoms store payload above bit 6
   if(tq==3) return di_int(q);
   return di(q);
 }
@@ -2634,14 +2672,14 @@ Q bn(B A,Q v,Q a,Q w){
 }
 Q ng(B A,Q v,Q a,Q w){
   (void)A; (void)v; (void)a;
-  if(!is_num_type(t(w))) return ac(2);
+  if(!is_num_type(t(w))) return ae(2);
   B sw=sh(w);
   if(sw==0){
     if(t(w)==T_FLT) return af(0, -num_f64_atom(w));
     Q bits = num_int_bits_atom(w);
     return an((J)(0 - bits));
   }
-  if(sw!=1) return ac(1);
+  if(sw!=1) return ae(1);
   D nw=n(w);
   if(t(w)==T_FLT){
     Q z=vne_u(0, T_FLT, 3, nw);
@@ -2666,7 +2704,7 @@ Q set(Q a,Q w,D sp){
 
     Q stack[64];
     Q wc = clone0_for_embed0(w, obj_ar(d), stack, 0);
-    if(34==t(wc)) return wc;
+    if(is_err(wc)) return wc;
     dkv(d, a, wc);
     return wc;
   }
@@ -2719,7 +2757,7 @@ Q lfa(B A,Q v,Q a,Q w){
   return z;
 }
 Q lvs(B A,Q v,Q a,Q w){
-  if(a)return ac(2);
+  if(a)return ae(2);
   Q h=dispatch(VM, VBM, v, 0, w);
   if(ii(w)){Q z=ln(1);zid(z,0,h);return z;}
   D nw=n(w);
@@ -2783,7 +2821,7 @@ Q lsl(B A,Q v,Q a,Q w){
   return z;
 }
 Q itr(B A,Q v,Q a,Q w){
-  if(!a)return ac(2);
+  if(!a)return ae(2);
   D n=di(a);
   Q r=w;
   for(D i=0;i<n;i++){
@@ -2794,7 +2832,7 @@ Q itr(B A,Q v,Q a,Q w){
   return r;
 }
 Q its(B A,Q v,Q a,Q w){
-  if(!a)return ac(2);
+  if(!a)return ae(2);
   D n=di(a);
   Q z=ln(n+1);
   Q r=w;
@@ -2908,14 +2946,14 @@ Q dispatch(VF* Vtab, const BM* Btab, Q v, Q a, Q w){
 
 Q lg(B A, Q v, Q a, Q w){
   Q f = fl(0, 0, 0, a);
-  if(t(f) == 34) return f;   // propagate file open error sentinel
-  if(t(f) != 9) return ac(2);
+  if(is_err(f)) return f;
+  if(t(f) != 9) return ae(2);
   return file_log(f, w);
 }
 Q rl(B A, Q v, Q a, Q w){
   Q f = fl(A, v, 0, w);
-  if(t(f) == 34) return f;
-  if(t(f) != 9) return ac(2);
+  if(is_err(f)) return f;
+  if(t(f) != 9) return ae(2);
   return file_read_log(f);
 }
 
@@ -2924,22 +2962,22 @@ Q mxcsr(B A, Q v, Q a, Q w){
 #if HAVE_MXCSR
   return an((J)(D)_mm_getcsr());
 #else
-  return ac(2);
+  return ae(2);
 #endif
 }
 
 Q setmxcsr(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a;
 #if HAVE_MXCSR
-  if(t(w)!=T_INT || sh(w)!=0) return ac(2);
+  if(t(w)!=T_INT || sh(w)!=0) return ae(2);
   J val = (J)ra(w);
-  if(val < 0 || (Q)val > 0xFFFFFFFFULL) return ac(2);
+  if(val < 0 || (Q)val > 0xFFFFFFFFULL) return ae(2);
   D old = (D)_mm_getcsr();
   _mm_setcsr((D)val);
   return an((J)old);
 #else
   (void)w;
-  return ac(2);
+  return ae(2);
 #endif
 }
 
@@ -2950,25 +2988,25 @@ Q ticks(B A, Q v, Q a, Q w){
 
 Q ev(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a;
-  if(t(w)!=6) return ac(2);
+  if(t(w)!=6) return ae(2);
   if(sh(w)==0){
     C c = (C)ra(w);
     return eval_code_tape(&c, 1);
   }
-  if(sh(w)!=1) return ac(1);
+  if(sh(w)!=1) return ae(1);
   return eval_code_tape((const C*)p(w), n(w));
 }
 
 Q bench(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a;
-  if(!ip(w) || t(w)!=0 || sh(w)!=1) return ac(2);
+  if(!ip(w) || t(w)!=0 || sh(w)!=1) return ae(2);
   D nw = n(w);
-  if(nw!=2 && nw!=3 && nw!=4) return ac(2);
+  if(nw!=2 && nw!=3 && nw!=4) return ae(2);
 
   Q qn = qi(w, 0);
-  if(t(qn)!=T_INT || sh(qn)!=0) return ac(2);
+  if(t(qn)!=T_INT || sh(qn)!=0) return ae(2);
   J iters_j = (J)ra(qn);
-  if(iters_j < 0 || iters_j > 0x7FFFFFFF) return ac(2);
+  if(iters_j < 0 || iters_j > 0x7FFFFFFF) return ae(2);
   D iters = (D)iters_j;
 
   B eval_mode = (nw==2);
@@ -2976,15 +3014,15 @@ Q bench(B A, Q v, Q a, Q w){
   Q code = 0;
   if(eval_mode){
     code = qi(w, 1);
-    if(t(code)!=6) return ac(2);
-    if(!(sh(code)==0 || sh(code)==1)) return ac(1);
+    if(t(code)!=6) return ae(2);
+    if(!(sh(code)==0 || sh(code)==1)) return ae(1);
   }else{
     verb = qi(w, 1);
     if(t(verb)==4){
-      if(!ip(verb) || sh(verb)!=1 || n(verb)!=1) return ac(2);
+      if(!ip(verb) || sh(verb)!=1 || n(verb)!=1) return ae(2);
       verb = pi(verb, 0);
     }
-    if(t(verb)!=2) return ac(2);
+    if(t(verb)!=2) return ae(2);
   }
 
   B is_dyad = (nw==4);
@@ -3040,7 +3078,7 @@ Q aply(B A, Q v, Q a, Q w){
 
   // Allow applying partial-wrapped verbs (e.g. p:+; p apply (2;3)).
   if(t(a)==4){
-    if(!ip(a) || sh(a)!=1 || n(a)!=1) return ac(2);
+    if(!ip(a) || sh(a)!=1 || n(a)!=1) return ae(2);
     a = pi(a, 0);
   }
 
@@ -3058,7 +3096,7 @@ Q aply(B A, Q v, Q a, Q w){
       Q omega = qi(w, 1);
       return dispatch(VD, VBD, a, alpha, omega);
     }
-    return ac(2);
+    return ae(2);
   }
 
   // Apply a lambda.
@@ -3066,24 +3104,24 @@ Q aply(B A, Q v, Q a, Q w){
     Q params = pi(a, 0);
     Q body = pi(a, 1);
     if(!ip(params) || t(params)!=T_SYM || sh(params)!=1){
-      return ac(2);
+      return ae(2);
     }
     if(!ip(body) || t(body)!=0 || sh(body)!=1){
-      return ac(2);
+      return ae(2);
     }
     D np = n(params);
 
     if(!w_is_list){
       if(np!=1){
-        return ac(2);
+        return ae(2);
       }
     }else{
       if((D)nw!=np){
-        return ac(2);
+        return ae(2);
       }
     }
 
-    if(SP+1 >= 1024) return ac(99);
+    if(SP+1 >= 1024) return ae(99);
     SP++;
     SC[SP] = dn(0,3,0,0);
 
@@ -3098,7 +3136,7 @@ Q aply(B A, Q v, Q a, Q w){
     Q* tape = tape_small;
     if(nt + 1ULL > (D)(sizeof(tape_small)/sizeof(tape_small[0]))){
       tape = (Q*)os_heap_alloc((Q)(nt + 1ULL) * (Q)sizeof(Q));
-      if(!tape){ if(SP>0) SP--; return ac(2); }
+      if(!tape){ if(SP>0) SP--; return ae(2); }
     }
     for(D i=0;i<nt;i++) tape[i] = pi(body, i);
     tape[nt] = 0;
@@ -3110,7 +3148,7 @@ Q aply(B A, Q v, Q a, Q w){
     return r;
   }
 
-  return ac(2);
+  return ae(2);
 }
 
 Q Ap(Q a){Q p=tsna(0,4,1,3,1,1);pid(p,0,a);return p;}
@@ -3151,7 +3189,7 @@ static inline Q apply_brackets(Q base, Q args){
 
 Q eoc(Q** q){
   (*q)++;                                                                      // consume '{'
-  if(SP+1 >= 1024) return ac(99);                                              // scope depth overflow
+  if(SP+1 >= 1024) return ae(99);                                              // scope depth overflow
   SP++;D csp=SP;                                                               // cache the SP of this new allocation, return that.
   SC[SP] = dn(0,3,0,0);                                                        // Allocate new dictionary for the new scope
   (void)E(q,'}',0);                                                            // Evaluate until '}' or end-of-stream
@@ -3166,7 +3204,7 @@ Q eoc(Q** q){
 
 Q ecc(Q** q){
   (*q)++;                                                                      // consume '}'
-  if(SP==0) return ac(2);
+  if(SP==0) return ae(2);
   Q d=SC[SP];
   SP--;
   return d;
@@ -3174,7 +3212,7 @@ Q ecc(Q** q){
 
 Q eol(Q** q){
   (*q)++;                                                                      // consume '('
-  if(LP+1 >= 1024) return ac(99);
+  if(LP+1 >= 1024) return ae(99);
   LP++;D clp=LP;
   NL[LP] = vca(0, 0, 3, 64);
   LC[LP] = ')';
@@ -3198,7 +3236,7 @@ Q eob(Q** q){
 
 Q eib(Q base, Q** q){
   (*q)++;                                                                      // consume '[' (postfix indexing)
-  if(LP+1 >= 1024) return ac(99);
+  if(LP+1 >= 1024) return ae(99);
   LP++;
   NL[LP] = vca(0, 0, 3, 64);
   LC[LP] = ']';
@@ -3216,11 +3254,11 @@ Q eib(Q base, Q** q){
 Q ecl(Q** q){
   // Close the most recent open list builder, or postfix index builder.
   Q a = **q;
-  if(!a || 34!=t(a)) return ac(2);
+  if(!a || 34!=t(a)) return ae(2);
   C close_tc = (C)dc(a);
   (*q)++;                                                                      // consume the close token
-  if(LP==0) return ac(2);
-  if(LC[LP] && close_tc != LC[LP]) return ac(2);
+  if(LP==0) return ae(2);
+  if(LC[LP] && close_tc != LC[LP]) return ae(2);
 
   Q l = NL[LP];
   B kind = LK[LP];
@@ -3274,7 +3312,7 @@ static Q eif(Q** q){
   // - Lazy: only the selected branch is evaluated.
   // - Branch expressions may be blocks via `[...]` (same scope) or `{...}` (new scope).
   (*q)++; // consume `if`
-  if(!(**q && 34==t(**q) && '['==(C)dc(**q))) return ac(2);
+  if(!(**q && 34==t(**q) && '['==(C)dc(**q))) return ae(2);
   (*q)++; // consume '['
 
   enum { IF_MAX_SEGS = 256 };
@@ -3286,14 +3324,14 @@ static Q eif(Q** q){
   D depth = 0;
   for(;;){
     Q tok = **q;
-    if(!tok) return ac(2); // missing closing ']'
+    if(!tok) return ae(2); // missing closing ']'
 
     if(34==t(tok)){
       C c = (C)dc(tok);
 
       // Top-level separators split segments.
       if(depth==0 && (c==';' || c=='\n')){
-        if(segc >= IF_MAX_SEGS) return ac(99);
+        if(segc >= IF_MAX_SEGS) return ae(99);
         seg_s[segc] = start;
         seg_e[segc] = *q;
         segc++;
@@ -3307,7 +3345,7 @@ static Q eif(Q** q){
       if(c=='{' || c=='(' || c=='['){ depth++; (*q)++; continue; }
       if(c=='}' || c==')' || c==']'){
         if(c==']' && depth==0){
-          if(segc >= IF_MAX_SEGS) return ac(99);
+          if(segc >= IF_MAX_SEGS) return ae(99);
           seg_s[segc] = start;
           seg_e[segc] = *q;
           segc++;
@@ -3323,14 +3361,14 @@ static Q eif(Q** q){
     (*q)++;
   }
 
-  if(segc < 2) return ac(2);
+  if(segc < 2) return ae(2);
 
   D pair_count = segc / 2;
   B has_else = (segc & 1) ? 1 : 0;
 
   for(D i=0;i<pair_count;i++){
     Q cond = eval_slice(seg_s[i*2], seg_e[i*2]);
-    if(34==t(cond)) return cond;
+    if(is_err(cond)) return cond;
     if(truthy(cond)){
       Q thenv = eval_slice(seg_s[i*2+1], seg_e[i*2+1]);
       return thenv;
@@ -3352,10 +3390,10 @@ static inline B is_lambda_obj(Q q){
 static Q elam(Q** q){
   // Lambda: {[a;b;...] body}
   // Stores (heap type T_LAMBDA): (params_symvec; body_token_list)
-  if(!(**q && 34==t(**q) && '{'==(C)dc(**q))) return ac(2);
+  if(!(**q && 34==t(**q) && '{'==(C)dc(**q))) return ae(2);
   (*q)++; // consume '{'
 
-  if(!(**q && 34==t(**q) && '['==(C)dc(**q))) return ac(2);
+  if(!(**q && 34==t(**q) && '['==(C)dc(**q))) return ae(2);
   (*q)++; // consume '['
 
   // Parse parameter list: refs/symbols separated by ';' or newlines.
@@ -3365,19 +3403,19 @@ static Q elam(Q** q){
   D cap = (D)(sizeof(tmp_params)/sizeof(tmp_params[0]));
   for(;;){
     Q tok = **q;
-    if(!tok) return ac(2);
+    if(!tok) return ae(2);
     if(34==t(tok)){
       C c = (C)dc(tok);
       if(c==';' || c=='\n'){ (*q)++; continue; }
       if(c==']'){ (*q)++; break; }
-      return ac(2);
+      return ae(2);
     }
     if(t(tok)==1){
       Q payload = ra(tok);
       if(nparams >= cap){
         D new_cap = cap + (cap>>1) + 8;
         Q* np = (Q*)os_heap_alloc((Q)new_cap * (Q)sizeof(Q));
-        if(!np) return ac(2);
+        if(!np) return ae(2);
         memcpy(np, params, (size_t)cap * sizeof(Q));
         if(params != tmp_params) os_heap_free(params);
         params = np;
@@ -3392,7 +3430,7 @@ static Q elam(Q** q){
       if(nparams >= cap){
         D new_cap = cap + (cap>>1) + 8;
         Q* np = (Q*)os_heap_alloc((Q)new_cap * (Q)sizeof(Q));
-        if(!np) return ac(2);
+        if(!np) return ae(2);
         memcpy(np, params, (size_t)cap * sizeof(Q));
         if(params != tmp_params) os_heap_free(params);
         params = np;
@@ -3402,7 +3440,7 @@ static Q elam(Q** q){
       (*q)++;
       continue;
     }
-    return ac(2);
+    return ae(2);
   }
 
   Q params_vec = vna(0, T_SYM, 3, nparams);
@@ -3414,7 +3452,7 @@ static Q elam(Q** q){
   D depth = 0;
   for(;;){
     Q tok = **q;
-    if(!tok) return ac(2);
+    if(!tok) return ae(2);
     if(34==t(tok)){
       C c = (C)dc(tok);
       if(c=='{' || c=='(' || c=='['){ depth++; (*q)++; continue; }
@@ -3432,7 +3470,7 @@ static Q elam(Q** q){
   Q body = ln(ntok);
   for(D i=0;i<ntok;i++) zid(body, i, body_start[i]);
 
-  if(!(**q && 34==t(**q) && '}'==(C)dc(**q))) return ac(2);
+  if(!(**q && 34==t(**q) && '}'==(C)dc(**q))) return ae(2);
   (*q)++; // consume '}'
 
   Q lam = tsna(0, T_LAMBDA, 1, 3, 2, 2);
@@ -3445,6 +3483,7 @@ Q emv(Q** q){
   Q v=*(*q)++;
   while(18==t(**q)){v=derive_verb(v,*(*q)++);}
   Q w=e(q);
+  if(is_err(w)) return w;
   if(4==t(w)){Q p=tsna(0,4,1,3,1,1);pid(p,0,v);return ca(0,av(8),p,w);}
   Q r=dispatch(VM, VBM, v, 0, w);
   return r;
@@ -3454,8 +3493,10 @@ Q edv(Q a,Q** q){
   D current_sp = SP;Q v=*(*q)++;
   while(18==t(**q)){v=derive_verb(v,*(*q)++);}                                                         // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q);
+  if(is_err(w)) return w;
   if(4==t(w)&&(7!=dv(v))){Q p=tsna(0,4,1,3,2,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
   a=((1==t(a))&&(7!=dv(v)))?dk(SC[current_sp],a):a;
+  if(is_err(a)) return a;
   if(7==dv(v)){return set(a,w,current_sp);}                                     // If this is an assignment, use the cached scope pointer to write into the correct scope.
   Q r=dispatch(VD, VBD, v, a, w);
   return r;
@@ -3475,17 +3516,18 @@ Q E(Q** q, C tc, B capture){
       continue;
     }                                                                              // ignore empty statements
     r=e(q);                                                                        // e() consumes exactly one expression
+    if(is_err(r)) return r;
     if(capture && !(4==t(r) && 0==n(r))){                                          // capture (skip "missing")
       Q v = r;
       if(ip(r) && 0==t(r)){
         Q stack[64];
         Q vc = clone0_for_embed0(r, obj_ar(NL[clp]), stack, 0);
-        if(34==t(vc)) return vc;
+        if(is_err(vc)) return vc;
         v = vc;
       }
 
       Q l=NL[clp];D idx=n(l);
-      Q l2=xn(l,1); if(34==t(l2)) return l2; if(l2!=l) NL[clp]=l2;
+      Q l2=xn(l,1); if(is_err(l2)) return l2; if(l2!=l) NL[clp]=l2;
       zid(NL[clp],idx,v);
     }
     if(**q && 34==t(**q) && (';'==dc(**q) || '\n'==dc(**q))){                      // consume statement terminator if present
@@ -3501,6 +3543,7 @@ Q E(Q** q, C tc, B capture){
 Q e(Q** q){
   Q a=**q;
   if(!a) return tsna(0,4,1,3,0,0);                                              // missing
+  if(is_err(a)){ (*q)++; return a; }
   if(34==t(a)){
     C c = (C)dc(a);
     if(';'==c || '\n'==c){(*q)++; return tsna(0,4,1,3,0,0);}                     // terminator => missing
@@ -3539,7 +3582,7 @@ Q e(Q** q){
     Q w0 = (*q)[1];
     if(w0 && 34==t(w0) && '['==(C)dc(w0)){
       Q noun = eif(q);
-      if(34==t(noun)) return noun;
+      if(is_err(noun)) return noun;
       while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);          // postfix indexing
  
       Q v = **q;
@@ -3560,6 +3603,7 @@ Q e(Q** q){
 
   (*q)++;                                                                        // consume noun/reference
   Q noun = (1==t(a)) ? dk(SC[SP], a) : a;
+  if(is_err(noun)) return noun;
   while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);              // postfix indexing
  
   Q v = **q;
@@ -3765,7 +3809,7 @@ static Q eval_code_tape(const C* src, D len){
   if(len >= 3 && (B)src[0]==0xEF && (B)src[1]==0xBB && (B)src[2]==0xBF){ src += 3; len -= 3; } // skip UTF-8 BOM
   Q* tokens_base = lx_len(src, len);
   dbg_write_startup("dbg: eval_code_tape lexed\n");
-  if(!tokens_base) return ac(2);
+  if(!tokens_base) return ae(2);
   if(dump_tokens_enabled()) dump_token_tape(tokens_base);
   Q* tokens = tokens_base;
   Q r = tsna(0,4,1,3,0,0); // missing
@@ -3792,10 +3836,10 @@ static Q eval_code_tape(const C* src, D len){
 }
 
 static Q eval_code_file(const char* fn){
-  if(!fn) return ac(2);
+  if(!fn) return ae(2);
   Q sz=0, h=0;
   void* addr = os_map_ro((char*)fn, &sz, &h);
-  if(!addr) { printf("load: map failed: %s\n", fn); return ac(2); }
+  if(!addr) { printf("load: map failed: %s\n", fn); return ae(2); }
   dbg_write_startup("dbg: eval_code_file mapped\n");
   Q r = (addr==(void*)1) ? 0 : eval_code_tape((const C*)addr, (D)sz);
   dbg_write_startup("dbg: eval_code_file tape done\n");
@@ -3809,6 +3853,13 @@ Q* lx_len(const C* b, D l){
   D qi=0;const C*p=b;const C* end=b+l;D st=0; // st:state
   while(st!=7){
     if(p>=end){st=7;break;}
+
+    // Line comment: `// ...` until end-of-line (newline is still a statement separator).
+    if(*p=='/' && (p+1)<end && p[1]=='/'){
+      p += 2;
+      while(p<end && *p!='\n' && *p!='\r') p++;
+      continue;
+    }
 
     // Statement separators:
     // - Newlines separate statements but do not suppress the last value.
@@ -3865,7 +3916,7 @@ Q* lx_len(const C* b, D l){
 
       if(err){
         if(vals!=tmp) os_heap_free(vals);
-        q[qi++]=ac(2);
+        q[qi++]=ae(2);
         st=0;continue;
       }
 
@@ -3896,7 +3947,7 @@ Q* lx_len(const C* b, D l){
         }
         D len_tok = (D)(p - s);
         Q atom = sym_intern_bytes(s, len_tok);
-        if(t(atom)==34){
+        if(is_err(atom)){
           errtok = atom;
           break;
         }
@@ -3909,7 +3960,7 @@ Q* lx_len(const C* b, D l){
           D new_cap = cap + (cap>>1) + 8;
           Q* nv = (Q*)os_heap_alloc((Q)(new_cap * (D)sizeof(Q)));
           if(!nv){
-            errtok = ac(2);
+            errtok = ae(2);
             break;
           }
           memcpy(nv, vals, (size_t)(cap * (D)sizeof(Q)));
@@ -3978,7 +4029,7 @@ Q* lx_len(const C* b, D l){
     if(cc>=7&&cc<=9){C ts[2]={*p,0};q[qi++]=cc==7?av(FV(ts)):cc==8?ac(*p):aa(FA(ts));p++;st=0;continue;} // verbs, controls, adverbs
     if(st==7){
       if(cc==0){st=7;break;} // embedded NUL: treat as end-of-input
-      q[qi++]=ac(2);p++;st=0;continue; // unknown/illegal char
+      q[qi++]=ae(2);p++;st=0;continue; // unknown/illegal char
     }
     while(st!=7){
       p++;
@@ -4010,7 +4061,7 @@ Q* lx_len(const C* b, D l){
             if(vi) q[qi++]=av(vi); else if(ai) q[qi++]=aa(ai);
             else {
               Q sym = sym_intern_bytes(tok, len);
-              if(34==t(sym)) q[qi++]=sym;
+              if(is_err(sym)) q[qi++]=sym;
               else q[qi++]=ar(ra(sym)); // reference payload is the symbol payload (interned or small)
             }
           }
@@ -4156,7 +4207,7 @@ I main(I argc, C** argv){
       AI[0]=1;SC[0]=dni(0,3,0,0); SP=0; 
      } // reset THI only if evaluation takes us back to the global scope. 
     Q* tokens_base = lx_len(line, (D)strlen(line));
-    if(!tokens_base){ os_heap_free(line); pr(ac(2)); printf("\n"); continue; }
+    if(!tokens_base){ os_heap_free(line); pr(ae(2)); printf("\n"); continue; }
     Q* tokens = tokens_base;
     Q r = tsna(0,4,1,3,0,0);                                                    // missing
     for(;;){

@@ -314,48 +314,40 @@ static inline Q buddy_units_from_order(B ord){
 static inline void commit_range(void* p, Q bytes){
   platform_commit_range(p, bytes);
 }
-Q bumpalloc(B t,B s,B z,D n,D c,Q ar){                                                    
+
+static inline Q bumpalloc_impl(B t, B s, B z, D n, D c, Q ar, B zero_payload){
   (void)ar;
-  Q units=bump_units(z,c);
-  if(AI[0]+units>AC[0]){exit(1);}
-  if(AI[0]+units>AM[0]){
-    Q req=AI[0]+units;
-    commit_range(AB[0]+AM[0]*BUMP_UNIT_QS, (req-AM[0])*BUMP_UNIT_BYTES);
-    AM[0]=req;
+  Q units = bump_units(z, c);
+  if(AI[0] + units > AC[0]) exit(1);
+  if(AI[0] + units > AM[0]){
+    Q req = AI[0] + units;
+    commit_range(AB[0] + AM[0] * BUMP_UNIT_QS, (req - AM[0]) * BUMP_UNIT_BYTES);
+    AM[0] = req;
   }
-  Q off=AI[0];
-  Q* o=AB[0]+off*BUMP_UNIT_QS;
-  AI[0]+=units;
-  ah(o,t,s,z,0,n,c);
-  memset(o+6,0,pz(z,c));
-  return (off<<6)|(0<<4);
+  Q off = AI[0];
+  Q* o = AB[0] + off * BUMP_UNIT_QS;
+  AI[0] += units;
+  ah(o, t, s, z, 0, n, c);
+  if(zero_payload) memset(o + 6, 0, pz(z, c));
+  return (off << 6) | (0 << 4);
+}
+
+Q bumpalloc(B t,B s,B z,D n,D c,Q ar){
+  return bumpalloc_impl(t, s, z, n, c, ar, 1);
 }
 
 Q bumpalloc_u(B t,B s,B z,D n,D c,Q ar){
   // Uninitialized payload allocation (header set, payload not zeroed).
   // Only use when the caller will fully initialize all n elements before any read.
-  (void)ar;
-  Q units=bump_units(z,c);
-  if(AI[0]+units>AC[0]){exit(1);}
-  if(AI[0]+units>AM[0]){
-    Q req=AI[0]+units;
-    commit_range(AB[0]+AM[0]*BUMP_UNIT_QS, (req-AM[0])*BUMP_UNIT_BYTES);
-    AM[0]=req;
-  }
-  Q off=AI[0];
-  Q* o=AB[0]+off*BUMP_UNIT_QS;
-  AI[0]+=units;
-  ah(o,t,s,z,0,n,c);
-  // no memset
-  return (off<<6)|(0<<4);
+  return bumpalloc_impl(t, s, z, n, c, ar, 0);
 }
 void bumpfree(B a){AI[a]=0;}
 void buddyinit(B a){
   for(D i=0;i<32;i++) BF[i]=~0ULL;
 
-  Q off=0;
-  Q rem=AC[a];               // units remaining
-  while(rem){
+Q off=0;
+Q rem=AC[a];               // units remaining
+while(rem){
     B ord = floor_ord(rem);
     if(ord>=32) ord=31;
 
@@ -368,19 +360,20 @@ void buddyinit(B a){
     rem -= u;
   }
 }
-Q buddyalloc(B t,B s,B z,D n,D c,Q ar){
+
+static inline Q buddyalloc_impl(B t, B s, B z, D n, D c, Q ar, B zero_payload){
   (void)ar;
-  Q units = buddy_units(z,c);
+  Q units = buddy_units(z, c);
   B ord   = buddy_order_from_units(units);
 
   B i = ord;
-  while(i<32 && BF[i]==~0ULL) i++;
-  if(i==32){ exit(1); }
+  while(i < 32 && BF[i] == ~0ULL) i++;
+  if(i == 32) exit(1);
 
   Q off = BF[i];
   BF[i] = *(Q*)(AB[1] + off * BUDDY_UNIT_QS);
 
-  while(i>ord){
+  while(i > ord){
     i--;
     Q u = buddy_units_from_order(i);
     Q b = off + u;
@@ -391,42 +384,21 @@ Q buddyalloc(B t,B s,B z,D n,D c,Q ar){
   }
 
   Q* o = AB[1] + off * BUDDY_UNIT_QS;
-  commit_range(o, az(z,c));
-  ah(o,t,s,z,0,n,c);
-  memset(o+6, 0, pz(z,c));
+  commit_range(o, az(z, c));
+  ah(o, t, s, z, 0, n, c);
+  if(zero_payload) memset(o + 6, 0, pz(z, c));
 
-  return (off << 11) | (ord << 6) | (1 << 4) ;
+  return (off << 11) | (ord << 6) | (1 << 4);
+}
+
+Q buddyalloc(B t,B s,B z,D n,D c,Q ar){
+  return buddyalloc_impl(t, s, z, n, c, ar, 1);
 }
 
 Q buddyalloc_u(B t,B s,B z,D n,D c,Q ar){
   // Uninitialized payload allocation (header set, payload not zeroed).
   // Only use when the caller will fully initialize all n elements before any read.
-  Q units = buddy_units(z,c);
-  B ord   = buddy_order_from_units(units);
-
-  B i = ord;
-  while(i<32 && BF[i]==~0ULL) i++;
-  if(i==32){ exit(1); }
-
-  Q off = BF[i];
-  BF[i] = *(Q*)(AB[1] + off * BUDDY_UNIT_QS);
-
-  while(i>ord){
-    i--;
-    Q u = buddy_units_from_order(i);
-    Q b = off + u;
-
-    commit_range(AB[1] + b * BUDDY_UNIT_QS, sizeof(Q));
-    *(Q*)(AB[1] + b * BUDDY_UNIT_QS) = BF[i];
-    BF[i] = b;
-  }
-
-  Q* o = AB[1] + off * BUDDY_UNIT_QS;
-  commit_range(o, az(z,c));
-  ah(o,t,s,z,0,n,c);
-  // no memset
-
-  return (off << 11) | (ord << 6) | (1 << 4) ;
+  return buddyalloc_impl(t, s, z, n, c, ar, 0);
 }
 void buddyfree(Q q){
   B a   = ha(q);

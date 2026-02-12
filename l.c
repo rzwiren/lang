@@ -2,8 +2,24 @@
 // windows: cl l.c /GL /O1 /Gy /MD /DNDEBUG /link /LTCG /OPT:REF /OPT:ICF
 // linux_asan: cc -fsanitize=address l.c -o l_lin_asan
 // linux: cc -Os l.c -o l_lin
+// -----------------------------------------------------------------------------
+// Compiler selection
+// -----------------------------------------------------------------------------
 #if defined(_MSC_VER)
+  #define L_CC_MSVC 1
   #define _CRT_SECURE_NO_WARNINGS
+#else
+  #define L_CC_MSVC 0
+#endif
+#if defined(__clang__)
+  #define L_CC_CLANG 1
+#else
+  #define L_CC_CLANG 0
+#endif
+#if defined(__GNUC__) && !defined(__clang__)
+  #define L_CC_GCC 1
+#else
+  #define L_CC_GCC 0
 #endif
 
 // -----------------------------------------------------------------------------
@@ -35,7 +51,7 @@
 #include <time.h>
 #if L_OS_WIN32
   #include <windows.h>
-  #if defined(_MSC_VER)
+  #if L_CC_MSVC
     #include <intrin.h>
   #endif
 #elif L_OS_POSIX
@@ -79,6 +95,59 @@ static B platform_stdin_is_console(void);
 static void platform_write_stderr_bytes(const char* s, size_t n);
 static Q platform_now_ns_u64(void);
 
+// -----------------------------------------------------------------------------
+// Compiler helpers (hide compiler/arch intrinsics behind a tiny API).
+// -----------------------------------------------------------------------------
+static inline D compiler_bsr64(Q x){
+#if L_CC_MSVC
+  unsigned long i = 0;
+  #if defined(_M_X64) || defined(_M_ARM64)
+    _BitScanReverse64(&i, (unsigned long long)x);
+    return (D)i;
+  #else
+    unsigned long hi = (unsigned long)(x >> 32);
+    unsigned long lo = (unsigned long)(x & 0xFFFFFFFFULL);
+    if(hi){
+      _BitScanReverse(&i, hi);
+      return (D)(i + 32);
+    }
+    _BitScanReverse(&i, lo);
+    return (D)i;
+  #endif
+#else
+  return (D)(63 - __builtin_clzll((unsigned long long)x));
+#endif
+}
+
+static inline D compiler_bsf64(Q x){
+#if L_CC_MSVC
+  unsigned long i = 0;
+  #if defined(_M_X64) || defined(_M_ARM64)
+    _BitScanForward64(&i, (unsigned long long)x);
+    return (D)i;
+  #else
+    unsigned long hi = (unsigned long)(x >> 32);
+    unsigned long lo = (unsigned long)(x & 0xFFFFFFFFULL);
+    if(lo){
+      _BitScanForward(&i, lo);
+      return (D)i;
+    }
+    _BitScanForward(&i, hi);
+    return (D)(i + 32);
+  #endif
+#else
+  return (D)__builtin_ctzll((unsigned long long)x);
+#endif
+}
+
+static inline int compiler_snprintf17g(C* buf, size_t buf_cap, double x){
+#if L_CC_MSVC
+  return _snprintf(buf, buf_cap, "%.17g", x);
+#else
+  return snprintf(buf, buf_cap, "%.17g", x);
+#endif
+}
+
 #define T_INT   3
 #define T_CHAR  6
 #define T_SYM   7
@@ -99,7 +168,7 @@ static Q platform_now_ns_u64(void);
 #define SYM_PAYLOAD_INTERN(id)   ((((Q)(id)) << 1) | 1ULL)
 #define SYM_PAYLOAD_SMALL(v)     (((Q)(v)) << 1)
 
-#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+#if L_CC_MSVC && (defined(_M_IX86) || defined(_M_X64))
   #include <xmmintrin.h>
   #define HAVE_MXCSR 1
 #elif (defined(__i386__) || defined(__x86_64__)) && defined(__SSE__)
@@ -220,21 +289,11 @@ Q pz(B z,D c){ return (1<<z)*c;}                                                
 Q az(B z,D c){ return hz()+pz(z,c);}                                            // allocation size
 void ah(Q* h,B t,B s,B z,D r,D n,D c){h[0]=t;h[1]=s;h[2]=z;h[3]=r;h[4]=n;h[5]=c;} // allocate the header. 
 D lsz(Q x){
-#if defined(_MSC_VER)
-  unsigned long i; _BitScanReverse64(&i,x-1); return i+1;
-#else
-  return 64-__builtin_clzll(x-1);
-#endif
+  return compiler_bsr64(x-1) + 1;
 }
 static inline B floor_ord(Q x){
   // x >= 1
-#if defined(_MSC_VER)
-  unsigned long i;
-  _BitScanReverse64(&i, x);
-  return (B)i;
-#else
-  return (B)(63 - __builtin_clzll(x));
-#endif
+  return (B)compiler_bsr64(x);
 }
 static inline Q bump_units(B z, D c){
   Q bytes = hz() + pz(z,c);
@@ -592,13 +651,7 @@ static inline Q obj_ar(Q q){
 
 // dict get/set
 static inline D lg2(D c){
-#if defined(_MSC_VER)
-  unsigned long idx;
-  _BitScanForward64(&idx, (unsigned long long)c);
-  return (D)idx;
-#else
-  return __builtin_ctzll(c);
-#endif
+  return compiler_bsf64((Q)c);
 }
 static B match_struct(Q a, Q w, D depth);
 
@@ -1747,11 +1800,7 @@ static inline void pr_f64(double x){
   if(isnan(x)){ printf("nan"); return; }
   if(isinf(x)){ printf("%sinf", x<0 ? "-" : ""); return; }
   C buf[80];
-#if defined(_MSC_VER)
-  int n = _snprintf(buf, sizeof(buf), "%.17g", x);
-#else
-  int n = snprintf(buf, sizeof(buf), "%.17g", x);
-#endif
+  int n = compiler_snprintf17g(buf, sizeof(buf), x);
   if(n <= 0){ printf("nan"); return; }
   B has_dot=0, has_exp=0;
   for(int i=0;i<n;i++){ if(buf[i]=='.') has_dot=1; else if(buf[i]=='e' || buf[i]=='E') has_exp=1; }

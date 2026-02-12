@@ -5,22 +5,48 @@
 #if defined(_MSC_VER)
   #define _CRT_SECURE_NO_WARNINGS
 #endif
+
+// -----------------------------------------------------------------------------
+// Platform selection (keep preprocessor conditionals out of the core runtime).
+// -----------------------------------------------------------------------------
+#if defined(__EMSCRIPTEN__) || defined(__wasm__) || defined(__wasm32__) || defined(__wasm64__)
+  #define L_OS_WASM 1
+#else
+  #define L_OS_WASM 0
+#endif
+
+#if defined(_WIN32) && !L_OS_WASM
+  #define L_OS_WIN32 1
+#else
+  #define L_OS_WIN32 0
+#endif
+
+#if !L_OS_WIN32 && !L_OS_WASM
+  #define L_OS_POSIX 1
+#else
+  #define L_OS_POSIX 0
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
 #include <math.h>
 #include <time.h>
-#if defined(_WIN32)
+#if L_OS_WIN32
   #include <windows.h>
   #if defined(_MSC_VER)
     #include <intrin.h>
   #endif
-#else
+#elif L_OS_POSIX
   #include <sys/mman.h>
   #include <fcntl.h>
   #include <unistd.h>
   #include <sys/stat.h>
+#elif L_OS_WASM
+  // WASM platform layer TBD (intentionally no OS headers here).
+#else
+  #error "Unsupported platform (no headers selected)"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -40,6 +66,18 @@ struct LANG_FREE_IS_ILLEGAL;
 typedef unsigned long long Q;typedef unsigned int D;typedef unsigned short W;typedef unsigned char B;typedef char C;
 typedef long long J; typedef int I; typedef short H;
 typedef Q(*VF)(B,Q,Q,Q);                                                        // function pointer for verb/adverb (arena;verb;alpha;omega)
+
+// -----------------------------------------------------------------------------
+// Platform API (implemented once per platform in the platform layer section).
+// -----------------------------------------------------------------------------
+static void platform_arena_reserve_init(void);
+static void platform_commit_range(void* p, Q bytes);
+static void* platform_vm_alloc(Q bytes);
+static void platform_vm_free(void* base, Q bytes);
+static void platform_init_stdout_utf8_if_console(void);
+static B platform_stdin_is_console(void);
+static void platform_write_stderr_bytes(const char* s, size_t n);
+static Q platform_now_ns_u64(void);
 
 #define T_INT   3
 #define T_CHAR  6
@@ -215,14 +253,7 @@ static inline Q buddy_units_from_order(B ord){
   return 1ULL << ord;
 }
 static inline void commit_range(void* p, Q bytes){
-#if defined(_WIN32)
-  VirtualAlloc(p, bytes, MEM_COMMIT, PAGE_READWRITE);
-#else
-  Q a=(Q)p, m=4095;
-  Q s=a&~m;
-  Q e=(a+bytes+m)&~m;
-  mprotect((void*)s, e-s, PROT_READ|PROT_WRITE);
-#endif
+  platform_commit_range(p, bytes);
 }
 Q bumpalloc(B t,B s,B z,D n,D c,Q ar){                                                    
   (void)ar;
@@ -1165,11 +1196,77 @@ static inline Q sym_intern_bytes(const C* bytes, D len){
   return as(SYM_PAYLOAD_INTERN(idx));
 }
 
+// -----------------------------------------------------------------------------
+// Platform layer
+//
+// Goal: keep preprocessor platform conditionals localized to a single section,
+// so the rest of the interpreter reads like a platform-agnostic runtime calling
+// a small OS API.
+// -----------------------------------------------------------------------------
+
+#if L_OS_WIN32
+
+static void platform_arena_reserve_init(void){
+  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
+  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
+}
+
+static void platform_commit_range(void* p, Q bytes){
+  VirtualAlloc(p, (SIZE_T)bytes, MEM_COMMIT, PAGE_READWRITE);
+}
+
+static void* platform_vm_alloc(Q bytes){
+  return VirtualAlloc(0, (SIZE_T)bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+}
+
+static void platform_vm_free(void* base, Q bytes){
+  (void)bytes;
+  VirtualFree(base, 0, MEM_RELEASE);
+}
+
+static void platform_init_stdout_utf8_if_console(void){
+  // Only attempt to change the console code page when stdout is an actual console.
+  // When stdout is redirected (e.g. piped from PowerShell), there may be no console attached.
+  HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
+  DWORD mode = 0;
+  if(hout && hout != INVALID_HANDLE_VALUE && GetConsoleMode(hout, &mode)){
+    SetConsoleOutputCP(65001);
+  }
+}
+
+static B platform_stdin_is_console(void){
+  HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+  DWORD mode = 0;
+  return (hin && hin != INVALID_HANDLE_VALUE && GetConsoleMode(hin, &mode)) ? 1 : 0;
+}
+
+static void platform_write_stderr_bytes(const char* s, size_t n){
+  if(!s || !n) return;
+  HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+  if(!h || h==INVALID_HANDLE_VALUE) return;
+  DWORD wrote = 0;
+  WriteFile(h, s, (DWORD)n, &wrote, NULL);
+}
+
+static Q platform_now_ns_u64(void){
+  static Q qpc_freq = 0;
+  if(!qpc_freq){
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    qpc_freq = (Q)f.QuadPart;
+    if(!qpc_freq) qpc_freq = 1;
+  }
+  LARGE_INTEGER c;
+  QueryPerformanceCounter(&c);
+  Q ticks = (Q)c.QuadPart;
+  Q sec = ticks / qpc_freq;
+  Q rem = ticks % qpc_freq;
+  return sec*1000000000ULL + (rem*1000000000ULL)/qpc_freq;
+}
 
 void* os_map(char* fn, Q* sz, Q* h_out){
   void* addr = 0;
   int is_new = 0;
-#if defined(_WIN32)
   HANDLE hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if(hf == INVALID_HANDLE_VALUE) {
     hf = CreateFileA(fn, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -1178,29 +1275,19 @@ void* os_map(char* fn, Q* sz, Q* h_out){
     }
     if(hf == INVALID_HANDLE_VALUE) return 0;
   } else { is_new = 0; }
-  LARGE_INTEGER li; GetFileSizeEx(hf, &li); *sz = li.QuadPart;
-  if(!*sz && is_new){ *sz=16; li.QuadPart=*sz; SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf); }
+  LARGE_INTEGER li; GetFileSizeEx(hf, &li); *sz = (Q)li.QuadPart;
+  if(!*sz && is_new){ *sz=16; li.QuadPart=(LONGLONG)*sz; SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf); }
   HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, 0, 0, NULL);
   if(!hmap) { CloseHandle(hf); return 0; }
   addr = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
   CloseHandle(hmap);
   *h_out = (Q)hf;
-#else
-  int fd = open(fn, O_RDWR | O_CREAT, 0644);
-  if(fd < 0) return 0;
-  struct stat st; fstat(fd, &st); *sz = st.st_size;
-  if(!*sz){ is_new=1; *sz=16; ftruncate(fd, 16); } else { is_new = 0; }
-  addr = mmap(0, *sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-  if(addr == MAP_FAILED) { close(fd); return 0; }
-  *h_out = (Q)fd;
-#endif
   if(is_new && addr && *sz >= 16) memset(addr, 0, 16);
   return addr;
 }
 
 void* os_map_ro(char* fn, Q* sz, Q* h_out){
   void* addr = 0;
-#if defined(_WIN32)
   HANDLE hf = CreateFileA(fn, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if(hf == INVALID_HANDLE_VALUE) return 0;
   LARGE_INTEGER li;
@@ -1213,29 +1300,14 @@ void* os_map_ro(char* fn, Q* sz, Q* h_out){
   CloseHandle(hmap);
   if(!addr) { CloseHandle(hf); return 0; }
   *h_out = (Q)hf;
-#else
-  int fd = open(fn, O_RDONLY);
-  if(fd < 0) return 0;
-  struct stat st;
-  if(fstat(fd, &st) < 0) { close(fd); return 0; }
-  *sz = (Q)st.st_size;
-  if(*sz == 0) { close(fd); *h_out = 0; return (void*)1; } // sentinel for empty file
-  addr = mmap(0, *sz, PROT_READ, MAP_PRIVATE, fd, 0);
-  if(addr == MAP_FAILED) { close(fd); return 0; }
-  *h_out = (Q)fd;
-#endif
   return addr;
 }
 
 void os_unmap_ro(void* addr, Q sz, Q h){
+  (void)sz;
   if(!addr || addr==(void*)1) return;
-#if defined(_WIN32)
   UnmapViewOfFile(addr);
   CloseHandle((HANDLE)h);
-#else
-  munmap(addr, sz);
-  close((int)h);
-#endif
 }
 
 void os_unmap(D fid){
@@ -1246,13 +1318,8 @@ void os_unmap(D fid){
 
   if(!addrs[fid]) return;
 
-#if defined(_WIN32)
   UnmapViewOfFile((void*)addrs[fid]);
   CloseHandle((HANDLE)hs[fid]);
-#else
-  munmap((void*)addrs[fid], caps[fid]);
-  close((int)hs[fid]);
-#endif
 
   addrs[fid] = 0;
   hs[fid] = 0;
@@ -1260,6 +1327,132 @@ void os_unmap(D fid){
   szs[fid] = 0;
   zid(FT_fn, fid, 0);
 }
+
+void os_truncate(Q h, Q sz){
+  HANDLE hf = (HANDLE)h;
+  LARGE_INTEGER li; li.QuadPart = (LONGLONG)sz;
+  SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf);
+}
+
+void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
+  (void)old_cap;
+  UnmapViewOfFile(addr);
+  HANDLE hf = (HANDLE)h;
+  HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, (DWORD)(new_cap >> 32), (DWORD)new_cap, NULL);
+  if(!hmap) return 0;
+  addr = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+  CloseHandle(hmap);
+  return addr;
+}
+
+#elif L_OS_POSIX
+
+static void platform_arena_reserve_init(void){
+  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
+  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
+}
+
+static void platform_commit_range(void* p, Q bytes){
+  Q a=(Q)p, m=4095;
+  Q s=a&~m;
+  Q e=(a+bytes+m)&~m;
+  mprotect((void*)s, (size_t)(e-s), PROT_READ|PROT_WRITE);
+}
+
+static void* platform_vm_alloc(Q bytes){
+  void* base = mmap(0, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  return (base == MAP_FAILED) ? 0 : base;
+}
+
+static void platform_vm_free(void* base, Q bytes){
+  munmap(base, (size_t)bytes);
+}
+
+static void platform_init_stdout_utf8_if_console(void){
+  // no-op
+}
+
+static B platform_stdin_is_console(void){
+  return isatty(fileno(stdin)) ? 1 : 0;
+}
+
+static void platform_write_stderr_bytes(const char* s, size_t n){
+  if(!s || !n) return;
+  (void)write(2, s, n);
+}
+
+static Q platform_now_ns_u64(void){
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (Q)ts.tv_sec*1000000000ULL + (Q)ts.tv_nsec;
+}
+
+void* os_map(char* fn, Q* sz, Q* h_out){
+  void* addr = 0;
+  int is_new = 0;
+  int fd = open(fn, O_RDWR | O_CREAT, 0644);
+  if(fd < 0) return 0;
+  struct stat st; fstat(fd, &st); *sz = (Q)st.st_size;
+  if(!*sz){ is_new=1; *sz=16; ftruncate(fd, 16); } else { is_new = 0; }
+  addr = mmap(0, (size_t)*sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if(addr == MAP_FAILED) { close(fd); return 0; }
+  *h_out = (Q)fd;
+  if(is_new && addr && *sz >= 16) memset(addr, 0, 16);
+  return addr;
+}
+
+void* os_map_ro(char* fn, Q* sz, Q* h_out){
+  void* addr = 0;
+  int fd = open(fn, O_RDONLY);
+  if(fd < 0) return 0;
+  struct stat st;
+  if(fstat(fd, &st) < 0) { close(fd); return 0; }
+  *sz = (Q)st.st_size;
+  if(*sz == 0) { close(fd); *h_out = 0; return (void*)1; } // sentinel for empty file
+  addr = mmap(0, (size_t)*sz, PROT_READ, MAP_PRIVATE, fd, 0);
+  if(addr == MAP_FAILED) { close(fd); return 0; }
+  *h_out = (Q)fd;
+  return addr;
+}
+
+void os_unmap_ro(void* addr, Q sz, Q h){
+  if(!addr || addr==(void*)1) return;
+  munmap(addr, (size_t)sz);
+  close((int)h);
+}
+
+void os_unmap(D fid){
+  Q* addrs = (Q*)p(FT_addr);
+  Q* caps  = (Q*)p(FT_cap);
+  Q* hs    = (Q*)p(FT_h);
+  Q* szs   = (Q*)p(FT_sz);
+
+  if(!addrs[fid]) return;
+
+  munmap((void*)addrs[fid], (size_t)caps[fid]);
+  close((int)hs[fid]);
+
+  addrs[fid] = 0;
+  hs[fid] = 0;
+  caps[fid] = 0;
+  szs[fid] = 0;
+  zid(FT_fn, fid, 0);
+}
+
+void os_truncate(Q h, Q sz){
+  ftruncate((int)h, sz);
+}
+
+void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
+  munmap(addr, (size_t)old_cap);
+  int fd = (int)h;
+  addr = mmap(0, (size_t)new_cap, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  return (addr == MAP_FAILED) ? 0 : addr;
+}
+
+#else
+  #error "Unsupported platform (no platform layer implementation)"
+#endif
 
 D find_empty_ft_slot(){
   D idx = n(FT_addr);
@@ -1278,32 +1471,6 @@ D find_empty_ft_slot(){
   return idx;
 }
 
-void os_truncate(Q h, Q sz){
-#if defined(_WIN32)
-  HANDLE hf = (HANDLE)h;
-  LARGE_INTEGER li; li.QuadPart = sz;
-  SetFilePointerEx(hf, li, NULL, FILE_BEGIN); SetEndOfFile(hf);
-#else
-  ftruncate((int)h, sz);
-#endif
-}
-
-void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
-#if defined(_WIN32)
-  UnmapViewOfFile(addr);
-  HANDLE hf = (HANDLE)h;
-  HANDLE hmap = CreateFileMapping(hf, NULL, PAGE_READWRITE, (DWORD)(new_cap >> 32), (DWORD)new_cap, NULL);
-  if(!hmap) return 0;
-  addr = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-  CloseHandle(hmap);
-#else
-  munmap(addr, old_cap);
-  int fd = (int)h;
-  addr = mmap(0, new_cap, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-#endif
-  return addr;
-}
-
 // -----------------------------------------------------------------------------
 // OS heap allocation (no libc malloc/free/realloc/calloc)
 //
@@ -1320,13 +1487,8 @@ static inline Q os_align16(Q x){ return (x + 15ULL) & ~15ULL; }
 
 static void* os_heap_alloc(Q payload_bytes){
   Q total = os_align16((Q)sizeof(OsHeapHdr) + payload_bytes);
-#if defined(_WIN32)
-  void* base = VirtualAlloc(0, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  void* base = platform_vm_alloc(total);
   if(!base) return 0;
-#else
-  void* base = mmap(0, (size_t)total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if(base == MAP_FAILED) return 0;
-#endif
   OsHeapHdr* h = (OsHeapHdr*)base;
   h->magic = OSHEAP_MAGIC;
   h->payload_bytes = payload_bytes;
@@ -1346,11 +1508,7 @@ static void os_heap_free(void* p){
   OsHeapHdr* h = ((OsHeapHdr*)p) - 1;
   if(h->magic != OSHEAP_MAGIC) return;
   Q total = h->total_bytes;
-#if defined(_WIN32)
-  VirtualFree((void*)h, 0, MEM_RELEASE);
-#else
-  munmap((void*)h, (size_t)total);
-#endif
+  platform_vm_free((void*)h, total);
 }
 
 static void* os_heap_realloc(void* p, Q new_payload_bytes){
@@ -1952,25 +2110,7 @@ static inline Q vne_u(Q ar, B t, B z, D n){
 }
 
 static inline Q now_ns_u64(void){
-#if defined(_WIN32)
-  static Q qpc_freq = 0;
-  if(!qpc_freq){
-    LARGE_INTEGER f;
-    QueryPerformanceFrequency(&f);
-    qpc_freq = (Q)f.QuadPart;
-    if(!qpc_freq) qpc_freq = 1;
-  }
-  LARGE_INTEGER c;
-  QueryPerformanceCounter(&c);
-  Q ticks = (Q)c.QuadPart;
-  Q sec = ticks / qpc_freq;
-  Q rem = ticks % qpc_freq;
-  return sec*1000000000ULL + (rem*1000000000ULL)/qpc_freq;
-#else
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (Q)ts.tv_sec*1000000000ULL + (Q)ts.tv_nsec;
-#endif
+  return platform_now_ns_u64();
 }
 
 static inline J floordiv_j(J a, J b){
@@ -3795,14 +3935,7 @@ static void parse_args(I argc, C** argv, const C** script_out, B* usage_out){
 
 static inline void dbg_write_startup(const char* s){
   if(!L_opts.dbg_startup || !s) return;
-#if defined(_WIN32)
-  HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-  if(!h || h==INVALID_HANDLE_VALUE) return;
-  DWORD wrote = 0;
-  WriteFile(h, s, (DWORD)strlen(s), &wrote, NULL);
-#else
-  (void)write(2, s, strlen(s));
-#endif
+  platform_write_stderr_bytes(s, strlen(s));
 }
 static void dump_token_tape(Q* toks){
   if(!toks) return;
@@ -4147,22 +4280,8 @@ I main(I argc, C** argv){
   parse_args(argc, argv, &script, &usage);
   if(usage) print_usage();
   dbg_write_startup("dbg: main start\n");
-#if defined(_WIN32)
-  {
-    // Only attempt to change the console code page when stdout is an actual console.
-    // When stdout is redirected (e.g. piped from PowerShell), there may be no console attached.
-    HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD mode = 0;
-    if(hout && hout != INVALID_HANDLE_VALUE && GetConsoleMode(hout, &mode)){
-      SetConsoleOutputCP(65001);
-    }
-  }
-  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
-  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
-#else
-  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
-  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
-#endif
+  platform_init_stdout_utf8_if_console();
+  platform_arena_reserve_init();
   dbg_write_startup("dbg: arenas reserved\n");
   buddyinit(1);
   dbg_write_startup("dbg: buddyinit done\n");
@@ -4186,16 +4305,7 @@ I main(I argc, C** argv){
 
   // In non-interactive/scripted usage (e.g. tests), stdin may not be a real console.
   // Avoid entering the REPL in that case to prevent stdio/handle edge-case crashes.
-  B stdin_is_console = 0;
-#if defined(_WIN32)
-  {
-    HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode = 0;
-    stdin_is_console = (hin && hin != INVALID_HANDLE_VALUE && GetConsoleMode(hin, &mode)) ? 1 : 0;
-  }
-#else
-  stdin_is_console = isatty(fileno(stdin)) ? 1 : 0;
-#endif
+  B stdin_is_console = platform_stdin_is_console();
 
   if(script){
     if(!ends_with_dot_l(script)){

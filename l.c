@@ -1719,7 +1719,7 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 35
+#define VTZ 37
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -3007,14 +3007,16 @@ Q lg(B A, Q v, Q a, Q w);
 Q rl(B A, Q v, Q a, Q w);
 Q mt(B A, Q v, Q a, Q w);
 Q arena(B A, Q v, Q a, Q w);
+Q lex(B A, Q v, Q a, Q w);
+Q lex2(B A, Q v, Q a, Q w);
 Q mxcsr(B A, Q v, Q a, Q w);
 Q setmxcsr(B A, Q v, Q a, Q w);
 Q ticks(B A, Q v, Q a, Q w);
 Q ev(B A, Q v, Q a, Q w);
 Q bench(B A, Q v, Q a, Q w);
 Q aply(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena};
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -3052,6 +3054,8 @@ static const BM VBM[VTZ]={
   /* 32 */ NB, // eval
   /* 33 */ NB, // apply
   /* 34 */ NB, // arena
+  /* 35 */ NB, // lex
+  /* 36 */ NB, // lex2
 };
 
 static const BM VBD[VTZ]={
@@ -3090,8 +3094,10 @@ static const BM VBD[VTZ]={
   /* 32 */ NB, // eval
   /* 33 */ NB, // apply
   /* 34 */ NB, // arena
+  /* 35 */ NB, // lex
+  /* 36 */ NB, // lex2
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -3153,6 +3159,48 @@ Q arena(B A, Q v, Q a, Q w){
   printf("AB[0] AC[0] AI[0] %lld %lld %lld\n", (long long)AB[0], (long long)AC[0], (long long)AI[0]);
   printf("AB[1] AC[1] AI[1] %lld %lld %lld\n", (long long)AB[1], (long long)AC[1], (long long)AI[1]);
   return tsna(0,4,1,3,0,0); // missing (print-only)
+}
+
+
+Q* lx_len(const C* b, D l);
+Q* lx2_len(const C* b, D l);
+
+static Q toks_tape_to_list(Q* toks){
+  if(!toks) return ae(2);
+  D nt=0;
+  while(toks[nt]) nt++;
+  Q z = ln(nt);
+  for(D i=0;i<nt;i++) zid(z, i, toks[i]);
+  os_heap_free(toks);
+  return z;
+}
+
+static Q lex_from_src(const C* src, D len, B use_new_lexer){
+  if(!src) return ae(2);
+  Q* toks = use_new_lexer ? lx2_len(src, len) : lx_len(src, len);
+  return toks_tape_to_list(toks);
+}
+
+Q lex(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  if(t(w)!=6) return ae(2);
+  if(sh(w)==0){
+    C c = (C)ra(w);
+    return lex_from_src(&c, 1, 0);
+  }
+  if(sh(w)!=1) return ae(1);
+  return lex_from_src((const C*)p(w), n(w), 0);
+}
+
+Q lex2(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  if(t(w)!=6) return ae(2);
+  if(sh(w)==0){
+    C c = (C)ra(w);
+    return lex_from_src(&c, 1, 1);
+  }
+  if(sh(w)!=1) return ae(1);
+  return lex_from_src((const C*)p(w), n(w), 1);
 }
 
 Q ev(B A, Q v, Q a, Q w){
@@ -3927,8 +3975,6 @@ static inline D ascii_adv_id(const C* p){
   return 0;
 }
 
-Q* lx_len(const C* b, D l);
-
 typedef struct {
   B dbg_startup;
   B dump_tokens;
@@ -4244,6 +4290,12 @@ Q* lx_len(const C* b, D l){
     }
   }
   q[qi]=0;return q;
+}
+
+// New lexer implementation placeholder (state-machine rewrite will live here).
+// For now, keep lex2 behavior identical for parity testing.
+Q* lx2_len(const C* b, D l){
+  return lx_len(b, l);
 }
 Q* lx(C*b){return lx_len(b,(D)strlen(b));}
 

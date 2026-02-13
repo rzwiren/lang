@@ -51,6 +51,7 @@ Invoke-LangScript "test\\minus_lex.l" "1"
 Invoke-LangScript "test\\div_mod.l" "1"
 Invoke-LangScript "test\\bench_ticks.l" "1"
 Invoke-LangScript "test\\eval_bench.l" "1"
+Invoke-LangScript "test\\inplace_bench_allocs.l" "1"
 Invoke-LangScriptExpectNoValue "test\\semicolon_suppress_print.l"
 Invoke-LangScript "test\\symbol_intern.l" "1"
 Invoke-LangScript "test\\symbol_print.l" '`abc'

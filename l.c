@@ -200,6 +200,14 @@ Q* AB[4];Q AI[4];Q AC[4];
 Q AM[4];
 Q AQ[4]={BUMP_UNIT_QS,BUDDY_UNIT_QS,BUMP_UNIT_QS,0};
 Q BF[32];
+
+typedef struct {
+  B dbg_startup;
+  B dump_tokens;
+  B no_inplace;
+} L_Opts;
+static L_Opts L_opts = {0,0,0};
+
 B ha(Q q){return (q>>4)&3;}
 Q FT_addr=0, FT_sz=0, FT_cap=0, FT_h=0, FT_fn=0;
 Q hp(B a,Q q){return q>>(0==a?6:1==a?11:6);}
@@ -2130,6 +2138,23 @@ static inline Q vne_u(Q ar, B t, B z, D n){
   return tsna_u(ar, t, 1, z, n, c);
 }
 
+static inline B num_can_inplace_w_vec(Q w, B out_t, D nz){
+  // Reuse omega's payload for elementwise numeric kernels when omega is:
+  // - bump arena (0) allocated
+  // - an unreffed (rc==0) vector
+  // - same element type/size as the output
+  // This reduces arena 0 bump pressure for chains like: 2 + 1 + !n
+  if(L_opts.no_inplace) return 0;
+  if(!itp(w)) return 0;
+  Q* hw = ptr(w);
+  if((B)hw[0] != out_t) return 0;
+  if((B)hw[1] != 1) return 0;
+  if((B)hw[2] != 3) return 0;  // 8-byte elements (int64/float64 bits)
+  if((D)hw[4] != nz) return 0; // exact length match
+  if(hw[3] != 0) return 0;     // unreffed in object graph => safe to mutate
+  return 1;
+}
+
 static inline Q now_ns_u64(void){
   return platform_now_ns_u64();
 }
@@ -2195,7 +2220,7 @@ typedef Q(*NumKernel)(Q a, Q w, B sa, B sw, D nz);
 
 static Q k_add_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) + num_f64_atom(w));
-  Q z=vne_u(0, T_FLT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2210,7 +2235,7 @@ static Q k_add_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_mul_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) * num_f64_atom(w));
-  Q z=vne_u(0, T_FLT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2225,7 +2250,7 @@ static Q k_mul_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_sub_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) - num_f64_atom(w));
-  Q z=vne_u(0, T_FLT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2240,7 +2265,7 @@ static Q k_sub_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_min_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0){ double x=num_f64_atom(a), y=num_f64_atom(w); return af(0, x<y?x:y); }
-  Q z=vne_u(0, T_FLT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2255,7 +2280,7 @@ static Q k_min_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_max_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0){ double x=num_f64_atom(a), y=num_f64_atom(w); return af(0, x>y?x:y); }
-  Q z=vne_u(0, T_FLT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2270,7 +2295,7 @@ static Q k_max_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_div_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) / num_f64_atom(w));
-  Q z=vne_u(0, T_FLT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2285,7 +2310,7 @@ static Q k_div_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_mod_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, fmod(num_f64_atom(a), num_f64_atom(w)));
-  Q z=vne_u(0, T_FLT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2301,7 +2326,7 @@ static Q k_mod_f(Q a,Q w,B sa,B sw,D nz){
 
 static Q k_add_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) + num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2316,7 +2341,7 @@ static Q k_add_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_mul_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) * num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2331,7 +2356,7 @@ static Q k_mul_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_sub_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) - num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2349,7 +2374,7 @@ static Q k_min_i(Q a,Q w,B sa,B sw,D nz){
     Q x=num_int_bits_atom(a), y=num_int_bits_atom(w);
     return an((J)(((J)x < (J)y) ? x : y));
   }
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2367,7 +2392,7 @@ static Q k_max_i(Q a,Q w,B sa,B sw,D nz){
     Q x=num_int_bits_atom(a), y=num_int_bits_atom(w);
     return an((J)(((J)x > (J)y) ? x : y));
   }
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2382,7 +2407,7 @@ static Q k_max_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_band_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) & num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2397,7 +2422,7 @@ static Q k_band_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_bor_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) | num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2412,7 +2437,7 @@ static Q k_bor_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_bxor_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) ^ num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2430,7 +2455,7 @@ static Q k_mod_i(Q a,Q w,B sa,B sw,D nz){
     J y=(J)num_int_bits_atom(w); if(!y) return ae(2);
     return an(floormod_j((J)num_int_bits_atom(a), y));
   }
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2449,7 +2474,7 @@ static Q k_floordiv_i(Q a,Q w,B sa,B sw,D nz){
     J y=(J)num_int_bits_atom(w); if(!y) return ae(2);
     return an(floordiv_j((J)num_int_bits_atom(a), y));
   }
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2466,7 +2491,7 @@ static Q k_floordiv_i(Q a,Q w,B sa,B sw,D nz){
 
 static Q k_eq_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) == num_f64_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2481,7 +2506,7 @@ static Q k_eq_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_lt_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) < num_f64_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2496,7 +2521,7 @@ static Q k_lt_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_gt_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) > num_f64_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2511,7 +2536,7 @@ static Q k_gt_f(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_eq_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) == (J)num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2526,7 +2551,7 @@ static Q k_eq_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_lt_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) < (J)num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2541,7 +2566,7 @@ static Q k_lt_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_gt_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) > (J)num_int_bits_atom(w)));
-  Q z=vne_u(0, T_INT, 3, nz);
+  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2691,15 +2716,34 @@ Q nt(B A,Q v,Q a,Q w){
 }
 
 Q tl(B A,Q v,Q a,Q w){
-  B aw=ii(w);if(aw){w=en(A,av(8),0,w);};D nw=n(w);Q z=lna(A,nw);
+  (void)v; (void)a;
+  if(t(w)!=T_INT) return ae(2);
+
+  // Scalar til: return the value vector directly (avoid transient container refs so rc stays 0).
+  if(sh(w)==0){
+    J nij = (J)ra(w);
+    if(nij < 0) return ae(2);
+    D ni = (D)nij;
+    Q zi = vne_u(0, T_INT, 3, ni);
+    Q* out = (Q*)p(zi);
+    for(D j=0;j<ni;j++) out[j] = (Q)j;
+    return zi;
+  }
+
+  // Vector til: return a list of value vectors.
+  if(sh(w)!=1) return ae(1);
+  D nw=n(w);
+  Q z=lna(A,nw);
   for(D i=0;i<nw;i++){
-    Q ni=pi(w,i);
+    J nij = (J)pi(w,i);
+    if(nij < 0) return ae(2);
+    D ni = (D)nij;
     Q zi=vne_u(0, T_INT, 3, ni);
     Q* out = (Q*)p(zi);
     for(D j=0;j<ni;j++) out[j] = (Q)j;
     zid(z,i,zi);
   }
-  return aw?car(A,av(6),0,z):z;
+  return z;
 }
 
 Q at(B A,Q v,Q a,Q w){
@@ -3218,7 +3262,8 @@ Q bench(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a;
   if(!ip(w) || t(w)!=0 || sh(w)!=1) return ae(2);
   D nw = n(w);
-  if(nw!=2 && nw!=3 && nw!=4) return ae(2);
+  enum { BENCH_F_ARENA0_PEAK = 1 };
+  if(nw<2 || nw>4) return ae(2);
 
   Q qn = qi(w, 0);
   if(t(qn)!=T_INT || sh(qn)!=0) return ae(2);
@@ -3226,15 +3271,24 @@ Q bench(B A, Q v, Q a, Q w){
   if(iters_j < 0 || iters_j > 0x7FFFFFFF) return ae(2);
   D iters = (D)iters_j;
 
-  B eval_mode = (nw==2);
   Q verb = 0;
   Q code = 0;
+  Q w1 = qi(w, 1);
+  B eval_mode = (t(w1)==6);
+  Q flags = 0;
   if(eval_mode){
-    code = qi(w, 1);
-    if(t(code)!=6) return ae(2);
+    code = w1;
     if(!(sh(code)==0 || sh(code)==1)) return ae(1);
+    if(nw==3){
+      flags = qi(w, 2);
+      if(t(flags)!=T_INT || sh(flags)!=0) return ae(2);
+      flags = ra(flags);
+    }else{
+      flags = 0;
+    }
   }else{
-    verb = qi(w, 1);
+    if(nw!=3 && nw!=4) return ae(2);
+    verb = w1;
     if(t(verb)==4){
       if(!ip(verb) || sh(verb)!=1 || n(verb)!=1) return ae(2);
       verb = pi(verb, 0);
@@ -3242,7 +3296,7 @@ Q bench(B A, Q v, Q a, Q w){
     if(t(verb)!=2) return ae(2);
   }
 
-  B is_dyad = (nw==4);
+  B is_dyad = (!eval_mode && nw==4);
   Q alpha = 0;
   Q omega = 0;
   if(!eval_mode){
@@ -3256,6 +3310,7 @@ Q bench(B A, Q v, Q a, Q w){
 
   Q start = now_ns_u64();
   Q last = tsna(0,4,1,3,0,0); // missing
+  Q ai0_peak_units = 0;
   for(D i=0;i<iters;i++){
     // Rewind temp arena allocations each iteration (except the last) so benchmarks
     // don't measure unbounded bump growth / page commits.
@@ -3271,6 +3326,8 @@ Q bench(B A, Q v, Q a, Q w){
     }else{
       r = is_dyad ? dispatch(VD, VBD, verb, alpha, omega) : dispatch(VM, VBM, verb, 0, omega);
     }
+    Q ai0_used = AI[0] - ai0_before;
+    if(ai0_used > ai0_peak_units) ai0_peak_units = ai0_used;
     if(i+1 < iters){
       ir(r);
       dr(r);
@@ -3281,10 +3338,19 @@ Q bench(B A, Q v, Q a, Q w){
   }
   Q end = now_ns_u64();
 
-  Q z = ln(2);
-  zid(z, 0, an((J)(end - start)));
-  zid(z, 1, last);
-  return z;
+  if(eval_mode && (flags & (Q)BENCH_F_ARENA0_PEAK)){
+    Q z = ln(4);
+    zid(z, 0, an((J)(end - start)));
+    zid(z, 1, last);
+    zid(z, 2, an((J)ai0_peak_units));
+    zid(z, 3, an((J)(ai0_peak_units * (Q)BUMP_UNIT_BYTES)));
+    return z;
+  }else{
+    Q z = ln(2);
+    zid(z, 0, an((J)(end - start)));
+    zid(z, 1, last);
+    return z;
+  }
 }
 
 static inline B is_lambda_obj(Q q);
@@ -3975,14 +4041,8 @@ static inline D ascii_adv_id(const C* p){
   return 0;
 }
 
-typedef struct {
-  B dbg_startup;
-  B dump_tokens;
-} L_Opts;
-static L_Opts L_opts = {0,0};
-
 static void print_usage(void){
-  printf("usage: l [--dbg-startup] [--dump-tokens] [script.l]\n");
+  printf("usage: l [--dbg-startup] [--dump-tokens] [--no-inplace] [script.l]\n");
 }
 
 static void parse_args(I argc, C** argv, const C** script_out, B* usage_out){
@@ -3993,6 +4053,7 @@ static void parse_args(I argc, C** argv, const C** script_out, B* usage_out){
     if(!a || !*a) continue;
     if(0==strcmp(a, "--dbg-startup")){ L_opts.dbg_startup = 1; continue; }
     if(0==strcmp(a, "--dump-tokens")){ L_opts.dump_tokens = 1; continue; }
+    if(0==strcmp(a, "--no-inplace")){ L_opts.no_inplace = 1; continue; }
     if(0==strcmp(a, "-h") || 0==strcmp(a, "--help")){ if(usage_out) *usage_out = 1; continue; }
     if(a[0]=='-'){ if(usage_out) *usage_out = 1; continue; }
     if(script_out && !*script_out){ *script_out = a; continue; }

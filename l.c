@@ -2155,6 +2155,20 @@ static inline B num_can_inplace_w_vec(Q w, B out_t, D nz){
   return 1;
 }
 
+static inline B num_can_inplace_vec_bytes(Q q, B out_ls, D nz){
+  // Like num_can_inplace_w_vec but only requires matching element *size* (ls),
+  // not matching element *type*. Useful for comparisons, which produce int
+  // vectors even when the input vector is float.
+  if(L_opts.no_inplace) return 0;
+  if(!itp(q)) return 0;
+  Q* h = ptr(q);
+  if((B)h[1] != 1) return 0;
+  if((B)h[2] != out_ls) return 0;
+  if((D)h[4] != nz) return 0;
+  if(h[3] != 0) return 0;
+  return 1;
+}
+
 static inline Q now_ns_u64(void){
   return platform_now_ns_u64();
 }
@@ -2491,7 +2505,9 @@ static Q k_floordiv_i(Q a,Q w,B sa,B sw,D nz){
 
 static Q k_eq_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) == num_f64_atom(w)));
-  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
+  Q z = (sw==1 && num_can_inplace_vec_bytes(w, 3, nz)) ? w :
+        (sa==1 && num_can_inplace_vec_bytes(a, 3, nz)) ? a :
+        vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2502,11 +2518,14 @@ static Q k_eq_f(Q a,Q w,B sa,B sw,D nz){
     double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
     out[i] = (Q)(x==y);
   }
+  if(z==a || z==w){ ptr(z)[0] = T_INT; ptr(z)[2] = 3; }
   return z;
 }
 static Q k_lt_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) < num_f64_atom(w)));
-  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
+  Q z = (sw==1 && num_can_inplace_vec_bytes(w, 3, nz)) ? w :
+        (sa==1 && num_can_inplace_vec_bytes(a, 3, nz)) ? a :
+        vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2517,11 +2536,14 @@ static Q k_lt_f(Q a,Q w,B sa,B sw,D nz){
     double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
     out[i] = (Q)(x<y);
   }
+  if(z==a || z==w){ ptr(z)[0] = T_INT; ptr(z)[2] = 3; }
   return z;
 }
 static Q k_gt_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_f64_atom(a) > num_f64_atom(w)));
-  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
+  Q z = (sw==1 && num_can_inplace_vec_bytes(w, 3, nz)) ? w :
+        (sa==1 && num_can_inplace_vec_bytes(a, 3, nz)) ? a :
+        vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2532,11 +2554,14 @@ static Q k_gt_f(Q a,Q w,B sa,B sw,D nz){
     double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
     out[i] = (Q)(x>y);
   }
+  if(z==a || z==w){ ptr(z)[0] = T_INT; ptr(z)[2] = 3; }
   return z;
 }
 static Q k_eq_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) == (J)num_int_bits_atom(w)));
-  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
+  Q z = (sw==1 && num_can_inplace_w_vec(w, T_INT, nz)) ? w :
+        (sa==1 && num_can_inplace_w_vec(a, T_INT, nz)) ? a :
+        vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2551,7 +2576,9 @@ static Q k_eq_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_lt_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) < (J)num_int_bits_atom(w)));
-  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
+  Q z = (sw==1 && num_can_inplace_w_vec(w, T_INT, nz)) ? w :
+        (sa==1 && num_can_inplace_w_vec(a, T_INT, nz)) ? a :
+        vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2566,7 +2593,9 @@ static Q k_lt_i(Q a,Q w,B sa,B sw,D nz){
 }
 static Q k_gt_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)((J)num_int_bits_atom(a) > (J)num_int_bits_atom(w)));
-  Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
+  Q z = (sw==1 && num_can_inplace_w_vec(w, T_INT, nz)) ? w :
+        (sa==1 && num_can_inplace_w_vec(a, T_INT, nz)) ? a :
+        vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
   Q* ap = sa ? (Q*)p(a) : 0;
   Q* wp = sw ? (Q*)p(w) : 0;
@@ -2689,7 +2718,7 @@ static Q int_bit_not(Q w){
   if(sw==0) return an((J)(~num_int_bits_atom(w)));
   if(sw!=1) return ae(1);
   D nw=n(w);
-  Q z=vne_u(0, T_INT, 3, nw);
+  Q z=num_can_inplace_w_vec(w, T_INT, nw) ? w : vne_u(0, T_INT, 3, nw);
   Q* out = (Q*)p(z);
   for(D i=0;i<nw;i++) out[i] = ~num_int_bits_elem(w, i);
   return z;
@@ -2705,7 +2734,7 @@ Q nt(B A,Q v,Q a,Q w){
   }
   if(sw!=1) return ae(1);
   D nw=n(w);
-  Q z=vne_u(0, T_INT, 3, nw);
+  Q z=(t(w)==T_INT && num_can_inplace_w_vec(w, T_INT, nw)) ? w : vne_u(0, T_INT, 3, nw);
   Q* out = (Q*)p(z);
   if(t(w)==T_FLT){
     for(D i=0;i<nw;i++) out[i] = (Q)(num_f64_elem(w,i)==0.0);
@@ -2885,12 +2914,12 @@ Q ng(B A,Q v,Q a,Q w){
   if(sw!=1) return ae(1);
   D nw=n(w);
   if(t(w)==T_FLT){
-    Q z=vne_u(0, T_FLT, 3, nw);
+    Q z=num_can_inplace_w_vec(w, T_FLT, nw) ? w : vne_u(0, T_FLT, 3, nw);
     Q* out = (Q*)p(z);
     for(D i=0;i<nw;i++) out[i] = f64_bits(-num_f64_elem(w,i));
     return z;
   }
-  Q z=vne_u(0, T_INT, 3, nw);
+  Q z=num_can_inplace_w_vec(w, T_INT, nw) ? w : vne_u(0, T_INT, 3, nw);
   Q* out = (Q*)p(z);
   for(D i=0;i<nw;i++) out[i] = 0 - num_int_bits_elem(w,i);
   return z;
@@ -3557,7 +3586,18 @@ Q ecl(Q** q){
   if(kind==0){
     // Delistify: treat `(expr)` as grouping if it contains no list separators on this line.
     // Singleton lists can still be created via enlist: `,expr`.
-    if(close_tc==')' && !saw_sep && n(l)==1) return pi(l, 0);
+    if(close_tc==')' && !saw_sep && n(l)==1){
+      // The list builder stores the single element via `zid`, which bumps its refcount.
+      // Grouping parentheses are not a semantic container, so detach the element from the
+      // temporary list and undo that refcount bump.
+      Q r0 = pi(l, 0);
+      pid(l, 0, 0);
+      if(ip(r0)){
+        Q* hr0 = ptr(r0);
+        if(hr0[3]) hr0[3]--;
+      }
+      return r0;
+    }
     return l;
   }
   Q r = apply_brackets(base, l);

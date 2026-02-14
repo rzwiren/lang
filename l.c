@@ -752,7 +752,10 @@ Q fk(Q* ht,Q k,D c,Q keys){                                                     
 Q SC[1024]; D SP=0;Q G;
 // Open list builders (for both (...) list literals and postfix [...] indexing lists).
 Q NL[1024]; D LP=0;
-// For each open list builder depth LP: expected closing token (')' or ']'), and kind (0=list literal, 1=postfix index).
+// For each open list builder depth LP: expected closing token (')' or ']'), and kind:
+// - 0: list literal / grouping
+// - 1: postfix index apply (base[...])
+// - 2: postfix index capture (base[...]:v lvalue parsing)
 C LC[1024];
 B LK[1024];
 // For LK==1 (postfix index), the base value being indexed (kept alive across unbalanced input).
@@ -1901,7 +1904,19 @@ void pr(Q q){
       }
     }
   }
-  if(1==t(q)){pr_sym_payload(ip(q)?pi(q,0):di(q));}
+  if(1==t(q)){
+    if(sh(q)==0){
+      pr_sym_payload(ip(q)?pi(q,0):di(q));
+    }else if(sh(q)==1){
+      D nq=n(q);
+      for(D i=0;i<nq;i++){
+        if(i) putchar('.');
+        pr_sym_payload(pi(q,i));
+      }
+    }else{
+      pr_sym_payload(ip(q)?pi(q,0):di(q));
+    }
+  }
   if(2==t(q)){
     Q v=q;
     D advs[32];D nadv=0;
@@ -2925,23 +2940,234 @@ Q ng(B A,Q v,Q a,Q w){
   return z;
 }
 
-Q set(Q a,Q w,D sp){
-  // Store bindings under symbol keys (not reference keys).
-  if(1==t(a)) a = as(ra(a));
-  Q d = SC[sp];
+static inline B is_dict(Q q){ return ip(q) && t(q)==0 && sh(q)==2; }
+static inline B is_ptr_list(Q q){ return ip(q) && t(q)==0 && sh(q)==1; }
+static inline B is_val_vec(Q q){ return ip(q) && sh(q)==1 && t(q)!=0 && t(q)!=4; }
+
+static inline Q set_embed_kv(Q dest_dict, Q key, Q w, D sp){
   if(ip(w) && 0==t(w)){
     // Preserve identity for open-scope/list builders so later input continues mutating the same object.
-    if(2==sh(w) && SP==sp+1 && SC[SP]==w){ dkv(d, a, w); return w; }
-    if(1==sh(w) && LP>0 && NL[LP]==w){ dkv(d, a, w); return w; }
+    // Only do this when the destination lives in the same arena as the builder to avoid storing pointers
+    // into an arena that may be reset.
+    if(obj_ar(dest_dict) == obj_ar(w)){
+      if(2==sh(w) && SP==sp+1 && SC[SP]==w){ dkv(dest_dict, key, w); return w; }
+      if(1==sh(w) && LP>0 && NL[LP]==w){ dkv(dest_dict, key, w); return w; }
+    }
 
     Q stack[64];
-    Q wc = clone0_for_embed0(w, obj_ar(d), stack, 0);
+    Q wc = clone0_for_embed0(w, obj_ar(dest_dict), stack, 0);
     if(is_err(wc)) return wc;
-    dkv(d, a, wc);
+    dkv(dest_dict, key, wc);
     return wc;
   }
-  dkv(d, a, w);
+  dkv(dest_dict, key, w);
   return w;
+}
+
+static Q container_set_scalar(Q container, Q idx, Q val){
+  if(is_dict(container)){
+    Q r = dkv(container, idx, val);
+    if(is_err(r)) return r;
+    return container;
+  }
+
+  if(is_ptr_list(container)){
+    if(t(idx)!=T_INT || sh(idx)!=0) return ae(2);
+    J ij = (J)ra(idx);
+    if(ij < 0) return ae(2);
+    D i = (D)ij;
+    if(i >= n(container)) return ae(2);
+    Q old = pi(container, i);
+    ir(val);
+    pid(container, i, val);
+    dr(old);
+    return container;
+  }
+
+  if(is_val_vec(container)){
+    if(t(idx)!=T_INT || sh(idx)!=0) return ae(2);
+    J ij = (J)ra(idx);
+    if(ij < 0) return ae(2);
+    D i = (D)ij;
+    if(i >= n(container)) return ae(2);
+
+    B tc = t(container);
+    if(tc==T_INT){
+      if(t(val)!=T_INT || sh(val)!=0) return ae(2);
+      pid(container, i, ra(val));
+      return container;
+    }
+    if(tc==T_FLT){
+      if(t(val)!=T_FLT || sh(val)!=0) return ae(2);
+      pid(container, i, ra(val));
+      return container;
+    }
+    if(tc==T_CHAR){
+      if(t(val)!=T_CHAR || sh(val)!=0) return ae(2);
+      pid(container, i, ra(val));
+      return container;
+    }
+    if(tc==T_SYM){
+      if(t(val)!=T_SYM || sh(val)!=0) return ae(2);
+      pid(container, i, ra(val));
+      return container;
+    }
+    if(tc==T_TAG){
+      if(t(val)!=T_TAG || sh(val)!=0) return ae(2);
+      pid(container, i, ra(val));
+      return container;
+    }
+
+    return ae(2);
+  }
+
+  return ae(2);
+}
+
+static Q container_set_in(Q container, Q idxs, D pos, D nidx, Q val){
+  if(pos >= nidx) return val;
+  Q idx = qi(idxs, pos);
+
+  if(pos + 1 == nidx){
+    return container_set_scalar(container, idx, val);
+  }
+
+  // Descend one level (create intermediate dicts on demand for dict containers).
+  Q child = at(0, av(3), container, idx);
+  if(is_err(child)) return child;
+  if(is_nf(child)){
+    if(is_dict(container)){
+      Q nd = dni(0, 3, 0, obj_ar(container));
+      Q r = dkv(container, idx, nd);
+      if(is_err(r)) return r;
+      child = nd;
+    }else{
+      return ae(2);
+    }
+  }
+
+  Q updated_child = container_set_in(child, idxs, pos+1, nidx, val);
+  if(is_err(updated_child)) return updated_child;
+
+  Q updated_container = container_set_scalar(container, idx, updated_child);
+  if(is_err(updated_container)) return updated_container;
+  return updated_container;
+}
+
+static inline Q container_set_path(Q container, Q idxs, Q val){
+  if(!idxs) return ae(2);
+  if(ii(idxs)) return container_set_scalar(container, idxs, val);
+  if(!is_ptr_list(idxs)) return ae(2);
+  D nidx = n(idxs);
+  if(nidx==0) return val; // x[]:v => replace x with v
+  return container_set_in(container, idxs, 0, nidx, val);
+}
+
+Q set(Q a,Q w,D sp){
+  Q d = SC[sp];
+
+  // Indexed assignment: (ref; idxs) : w   where ref is a reference token and idxs is a flattened index list.
+  if(is_ptr_list(a) && n(a)==2){
+    Q ref = pi(a, 0);
+    Q idxs = pi(a, 1);
+    if(ref && t(ref)==1){
+
+      // Resolve the parent dictionary + final key to update (creating dotref intermediate dicts if needed).
+      Q parent = d;
+      Q key = 0;
+
+      if(sh(ref)==0){
+        key = as(ra(ref));
+      }else if(sh(ref)==1){
+        D segc = n(ref);
+        if(segc <= 0) return ae(2);
+
+        Q base_key = as(pi(ref, 0));
+        if(segc == 1){
+          key = base_key;
+        }else{
+          Q cur = dki(d, base_key);
+          if(is_err(cur)) return cur;
+          if(!cur){
+            Q nd = dni(0, 3, 0, obj_ar(d));
+            dkv(d, base_key, nd);
+            cur = nd;
+          }
+          if(!is_dict(cur)) return ae(2);
+
+          for(D i=1;i<segc-1;i++){
+            Q k = as(pi(ref, i));
+            Q next = dki(cur, k);
+            if(is_err(next)) return next;
+            if(!next){
+              Q nd = dni(0, 3, 0, obj_ar(cur));
+              dkv(cur, k, nd);
+              next = nd;
+            }
+            if(!is_dict(next)) return ae(2);
+            cur = next;
+          }
+
+          parent = cur;
+          key = as(pi(ref, segc-1));
+        }
+      }else{
+        return ae(1);
+      }
+
+      Q base = dki(parent, key);
+      if(is_err(base)) return base;
+      if(!base) return ae(2);
+
+      Q updated = container_set_path(base, idxs, w);
+      if(is_err(updated)) return updated;
+      Q r2 = dkv(parent, key, updated);
+      if(is_err(r2)) return r2;
+      return w;
+    }
+  }
+
+  // Dotted reference assignment: a.b.c : w
+  if(a && t(a)==1 && sh(a)==1){
+    D segc = n(a);
+    if(segc <= 0) return ae(2);
+
+    Q base_key = as(pi(a, 0));
+    if(segc == 1){
+      return set_embed_kv(d, base_key, w, sp);
+    }
+
+    // Ensure base container exists in the current scope dict.
+    Q cur = dki(d, base_key);
+    if(is_err(cur)) return cur;
+    if(!cur){
+      Q nd = dni(0, 3, 0, obj_ar(d));
+      dkv(d, base_key, nd);
+      cur = nd;
+    }
+    if(!(ip(cur) && t(cur)==0 && sh(cur)==2)) return ae(2);
+
+    // Create intermediate dicts as needed.
+    for(D i=1;i<segc-1;i++){
+      Q k = as(pi(a, i));
+      Q next = dki(cur, k);
+      if(is_err(next)) return next;
+      if(!next){
+        Q nd = dni(0, 3, 0, obj_ar(cur));
+        dkv(cur, k, nd);
+        next = nd;
+      }
+      if(!(ip(next) && t(next)==0 && sh(next)==2)) return ae(2);
+      cur = next;
+    }
+
+    Q last_key = as(pi(a, segc-1));
+    return set_embed_kv(cur, last_key, w, sp);
+  }
+
+  // Store bindings under symbol keys (not reference keys).
+  if(1==t(a)) a = as(ra(a));
+  return set_embed_kv(d, a, w, sp);
 }
 
 Q ca(B A,Q v,Q a,Q w){
@@ -3563,6 +3789,24 @@ Q eib(Q base, Q** q){
   return apply_brackets(LBASE[LP], NL[LP]);
 }
 
+static Q eix(Q** q){
+  // Capture-only postfix indexing list: parse `[...]` into a list of evaluated indices without applying.
+  (*q)++;                                                                      // consume '['
+  if(LP+1 >= 1024) return ae(99);
+  LP++;
+  NL[LP] = vca(0, 0, 3, 64);
+  LC[LP] = ']';
+  LK[LP] = 2;
+  LBASE[LP] = 0;
+  LSEP[LP] = 0;
+  (void)E(q,']',1);
+  if(**q && 34==t(**q) && ']'==dc(**q)){
+    return ecl(q);
+  }
+  // Unbalanced '[': keep builder open; return current captured indices.
+  return NL[LP];
+}
+
 Q ecl(Q** q){
   // Close the most recent open list builder, or postfix index builder.
   Q a = **q;
@@ -3600,9 +3844,13 @@ Q ecl(Q** q){
     }
     return l;
   }
-  Q r = apply_brackets(base, l);
-  dr(base);
-  return r;
+  if(kind==1){
+    Q r = apply_brackets(base, l);
+    dr(base);
+    return r;
+  }
+  // kind==2: capture-only indexing list
+  return l;
 }
 
 static inline B is_missing(Q q){ return q && 4==t(q) && 0==n(q); }
@@ -3812,17 +4060,44 @@ Q emv(Q** q){
   return r;
 }
 
+static inline Q resolve_ref(Q env, Q ref);
+
 Q edv(Q a,Q** q){
   D current_sp = SP;Q v=*(*q)++;
   while(18==t(**q)){v=derive_verb(v,*(*q)++);}                                                         // Cache the scope pointer before evaluating the right-hand side.
   Q w=e(q);
   if(is_err(w)) return w;
   if(4==t(w)&&(7!=dv(v))){Q p=tsna(0,4,1,3,2,2);pid(p,0,a);pid(p,1,v);return ca(0,av(8),p,w);}  // handle partial evaluations but allow assignment of them instantly. 
-  a=((1==t(a))&&(7!=dv(v)))?dk(SC[current_sp],a):a;
+  if((1==t(a)) && (7!=dv(v))) a = resolve_ref(SC[current_sp], a);
   if(is_err(a)) return a;
   if(7==dv(v)){return set(a,w,current_sp);}                                     // If this is an assignment, use the cached scope pointer to write into the correct scope.
   Q r=dispatch(VD, VBD, v, a, w);
   return r;
+}
+
+static inline Q resolve_dotref(Q env, Q dotref){
+  if(!dotref || t(dotref)!=1 || sh(dotref)!=1) return ae(2);
+  D segc = n(dotref);
+  if(segc <= 0) return ae(2);
+
+  // First segment is an environment lookup; the rest are literal symbol keys applied via dyadic '@'.
+  Q base_ref = ar(pi(dotref, 0));
+  Q cur = dk(env, base_ref);
+  if(is_err(cur) || is_nf(cur)) return cur;
+
+  for(D i=1;i<segc;i++){
+    Q key = as(pi(dotref, i));
+    cur = at(0, av(3), cur, key);
+    if(is_err(cur) || is_nf(cur)) return cur;
+  }
+  return cur;
+}
+
+static inline Q resolve_ref(Q env, Q ref){
+  if(!ref || t(ref)!=1) return ref;
+  if(sh(ref)==0) return dk(env, ref);
+  if(sh(ref)==1) return resolve_dotref(env, ref);
+  return ae(1);
 }
 
 Q E(Q** q, C tc, B capture){
@@ -3925,10 +4200,74 @@ Q e(Q** q){
   if(!end && w && 2==t(w)){(*q)++; return edv(a, q);}                            // dyadic a v w...
 
   (*q)++;                                                                        // consume noun/reference
-  Q noun = (1==t(a)) ? dk(SC[SP], a) : a;
+
+  // Lvalue support: x[...]:v and a.b.c[...]:v
+  // If we see postfix brackets after a reference, we may need to avoid applying them eagerly so
+  // assignment can interpret them as a set-at-depth operation.
+  if(1==t(a) && **q && 34==t(**q) && '['==(C)dc(**q)){
+    Q bracks = ln(0);
+    while(**q && 34==t(**q) && '['==(C)dc(**q)){
+      Q args = eix(q);
+      if(is_err(args)) return args;
+      D bi = n(bracks);
+      Q br2 = xn(bracks, 1);
+      if(is_err(br2)) return br2;
+      if(br2!=bracks) bracks = br2;
+      zid(bracks, bi, args);
+    }
+
+    Q v0 = **q;
+    Q w0 = v0 ? (*q)[1] : 0;
+    B end0 = !w0 || (34==t(w0) && (';'==dc(w0) || '\n'==dc(w0) || '}'==dc(w0) || ')'==dc(w0) || ']'==dc(w0)));
+    if(v0 && 2==t(v0) && dv(v0)==7 && !end0){
+      // Flatten bracket groups into a single index path (x[i][j] => (i;j), x[i;j] => (i;j)).
+      Q idxs = ln(0);
+      D nb = n(bracks);
+      for(D i=0;i<nb;i++){
+        Q args = qi(bracks, i);
+        if(is_ptr_list(args)){
+          D na = n(args);
+          if(na){
+            D old = n(idxs);
+            Q idxs2 = xn(idxs, na);
+            if(is_err(idxs2)) return idxs2;
+            if(idxs2!=idxs) idxs = idxs2;
+            for(D j=0;j<na;j++) zid(idxs, old+j, qi(args, j));
+          }
+        }else if(args){
+          D old = n(idxs);
+          Q idxs2 = xn(idxs, 1);
+          if(is_err(idxs2)) return idxs2;
+          if(idxs2!=idxs) idxs = idxs2;
+          zid(idxs, old, args);
+        }
+      }
+
+      Q lv = ln(2);
+      zid(lv, 0, a);
+      zid(lv, 1, idxs);
+      return edv(lv, q);
+    }
+
+    Q noun = resolve_ref(SC[SP], a);
+    if(is_err(noun)) return noun;
+    D nb = n(bracks);
+    for(D i=0;i<nb;i++){
+      noun = apply_brackets(noun, qi(bracks, i));
+      if(is_err(noun)) return noun;
+    }
+
+    Q v = **q;
+    Q w2 = v ? (*q)[1] : 0;
+    B end2 = !w2 || (34==t(w2) && (';'==dc(w2) || '\n'==dc(w2) || '}'==dc(w2) || ')'==dc(w2) || ']'==dc(w2)));
+    if(v && 2==t(v) && !end2) return edv(noun, q);                                 // dyadic (after postfix indexing)
+    return noun;
+  }
+
+  Q noun = (1==t(a)) ? resolve_ref(SC[SP], a) : a;
   if(is_err(noun)) return noun;
   while(**q && 34==t(**q) && '['==(C)dc(**q)) noun = eib(noun, q);              // postfix indexing
- 
+  
   Q v = **q;
   Q w2 = v ? (*q)[1] : 0;
   B end2 = !w2 || (34==t(w2) && (';'==dc(w2) || '\n'==dc(w2) || '}'==dc(w2) || ')'==dc(w2) || ']'==dc(w2)));
@@ -4373,11 +4712,67 @@ Q* lx_len(const C* b, D l){
           else { // st==4 name
             D vi=FV(tok);
             D ai=FA(tok);
-            if(vi) q[qi++]=av(vi); else if(ai) q[qi++]=aa(ai);
+            if(vi) q[qi++]=av(vi);
+            else if(ai) q[qi++]=aa(ai);
             else {
-              Q sym = sym_intern_bytes(tok, len);
-              if(is_err(sym)) q[qi++]=sym;
-              else q[qi++]=ar(ra(sym)); // reference payload is the symbol payload (interned or small)
+              // Dotted reference sugar: a.b.c
+              // Lex as a single reference token with shape 1 (vector of symbol payloads).
+              // Evaluation interprets this as: (((a@`b)@`c)...).
+              B has_dot = 0;
+              for(D i=0;i<len;i++){ if(tok[i]=='.'){ has_dot = 1; break; } }
+
+              if(!has_dot){
+                Q sym = sym_intern_bytes(tok, len);
+                if(is_err(sym)) q[qi++]=sym;
+                else q[qi++]=ar(ra(sym)); // reference payload is the symbol payload (interned or small)
+              }else{
+                // Validate + count segments.
+                if(len<=0 || tok[0]=='.' || tok[len-1]=='.'){ q[qi++]=ae(2); }
+                else{
+                  D segc = 1;
+                  B bad = 0;
+                  for(D i=1;i<len;i++){
+                    if(tok[i]=='.'){
+                      segc++;
+                      if(tok[i-1]=='.'){ bad = 1; break; }
+                    }
+                  }
+                  if(bad){ q[qi++]=ae(2); }
+                  else{
+                    Q tmp_payloads[32];
+                    Q* payloads = tmp_payloads;
+                    if(segc > (D)(sizeof(tmp_payloads)/sizeof(tmp_payloads[0]))){
+                      payloads = (Q*)os_heap_alloc((Q)segc * (Q)sizeof(Q));
+                      if(!payloads){ q[qi++]=ae(2); goto lx_name_done; }
+                    }
+
+                    D segi = 0;
+                    D start = 0;
+                    Q errtok = 0;
+                    for(D i=0;i<=len;i++){
+                      if(i==len || tok[i]=='.'){
+                        D slen = i - start;
+                        if(slen <= 0){ errtok = ae(2); break; }
+                        Q sym = sym_intern_bytes(tok + start, slen);
+                        if(is_err(sym)){ errtok = sym; break; }
+                        payloads[segi++] = ra(sym);
+                        start = i + 1;
+                      }
+                    }
+
+                    if(!errtok){
+                      Q rv = vna(0, 1, 3, segi);
+                      for(D i=0;i<segi;i++) pid(rv, i, payloads[i]);
+                      q[qi++] = rv;
+                    }else{
+                      q[qi++] = errtok;
+                    }
+
+                    if(payloads != tmp_payloads) os_heap_free(payloads);
+lx_name_done:;
+                  }
+                }
+              }
             }
           }
           if(tok!=tmp_small) os_heap_free(tok);

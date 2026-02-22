@@ -232,17 +232,22 @@ Q da(Q q){return q>>6;}
 Q dc(Q q){return q>>6;}                                                       // controls are grammatical type, subtype 2. payload in high 59 bits
 Q de(Q q){return q>>6;}                                                       // errors are grammatical type, subtype 3. payload in high 59 bits
 
+Q tsna(Q ar, B t, B s, B z, D n, D c);                                         // forward decl (needed by an)
+
 Q ar(Q r){return (r<<4)|1;}                                                   // create an atom of type 1 (reference)
 Q av(Q v){return (v<<6)|2;}                                                   // create a verb atom (grammatical type 2, subtype 0)
 Q aa(Q a){return (a<<6)|(1<<4)|2;}                                            // create an adverb atom (grammatical type 2, subtype 1)
 Q ac(Q c){return (c<<6)|(2<<4)|2;}                                            // create a control atom (grammatical type 2, subtype 2)
 Q ae(Q e){return (e<<6)|(3<<4)|2;}                                            // create an error atom (grammatical type 2, subtype 3)
-Q an(J n){                                                                    // create an atom of type 3 (signed 60-bit immediate integer)
+Q an(J n){                                                                    // create an int atom (signed 60-bit immediate when possible; otherwise heap int64 atom)
   if(n >= -(1LL<<59) && n < (1LL<<59)){
     Q payload = ((Q)n) & ((1ULL<<60)-1ULL);
     return (payload<<4) | T_INT;
   }
-  return (0|T_INT);                                                           // TODO: heap allocate 64-bit int when out of immediate range
+  Q q = tsna(0, T_INT, 0, 3, 1, 1);
+  Q bits = (Q)n;
+  memcpy(p(q), &bits, sizeof(bits));
+  return q;
 }
 Q ap(Q v){return (v<<4)|4;}                                                   // create an atom of type 4 (partial eval) - HEAP ONLY
                                                                               // type 5 is hash
@@ -1637,6 +1642,67 @@ Q sv(B A, Q v, Q a, Q w){
   return w;
 }
 
+static Q text_read(Q w){
+#if L_OS_WASM
+  (void)w;
+  return ae(2);
+#else
+  if(t(w)!=T_CHAR) return ae(2);
+  C fn[1024];
+  if(!qstr_to_c(w, fn, (D)sizeof(fn))) return ae(2);
+
+  Q sz = 0, h = 0;
+  void* addr = os_map_ro(fn, &sz, &h);
+  if(!addr) return ae(2);
+  if(addr==(void*)1) return vna(0, T_CHAR, 0, 0);
+  if(sz > 0xFFFFFFFFULL){ os_unmap_ro(addr, sz, h); return ae(2); }
+
+  Q z = vna(0, T_CHAR, 0, (D)sz);
+  if(sz) memcpy(p(z), addr, (size_t)sz);
+  os_unmap_ro(addr, sz, h);
+  return z;
+#endif
+}
+
+static Q text_write(Q a, Q w){
+#if L_OS_WASM
+  (void)a; (void)w;
+  return ae(2);
+#else
+  if(t(a)!=T_CHAR) return ae(2);
+  C fn[1024];
+  if(!qstr_to_c(a, fn, (D)sizeof(fn))) return ae(2);
+
+  if(t(w)!=T_CHAR) return ae(2);
+
+  FILE* f = fopen(fn, "wb");
+  if(!f) return ae(2);
+
+  if(sh(w)==0){
+    C c = (C)(ip(w) ? pi(w, 0) : di(w));
+    if(1 != fwrite(&c, 1, 1, f)){ fclose(f); return ae(2); }
+  }else if(sh(w)==1){
+    size_t nw = (size_t)n(w);
+    if(nw && nw != fwrite(p(w), 1, nw, f)){ fclose(f); return ae(2); }
+  }else{
+    fclose(f);
+    return ae(2);
+  }
+
+  fclose(f);
+  return w;
+#endif
+}
+
+Q textm(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  return text_read(w);
+}
+Q textd(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+  return text_write(a, w);
+}
+
 Q file_read(Q f){
   D fid = AR_FID(di(f));
   Q root = *(Q*)((Q*)p(FT_addr))[fid];
@@ -1730,7 +1796,7 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 37
+#define VTZ 38
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -3314,8 +3380,8 @@ Q ticks(B A, Q v, Q a, Q w);
 Q ev(B A, Q v, Q a, Q w);
 Q bench(B A, Q v, Q a, Q w);
 Q aply(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2};
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -3355,6 +3421,7 @@ static const BM VBM[VTZ]={
   /* 34 */ NB, // arena
   /* 35 */ NB, // lex
   /* 36 */ NB, // lex2
+  /* 37 */ NB, // text
 };
 
 static const BM VBD[VTZ]={
@@ -3395,8 +3462,9 @@ static const BM VBD[VTZ]={
   /* 34 */ NB, // arena
   /* 35 */ NB, // lex
   /* 36 */ NB, // lex2
+  /* 37 */ NB, // text
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -4843,6 +4911,56 @@ static C* read_line(FILE* in){
   return buf;
 }
 
+static B repl_buf_in_open_string(const C* buf, size_t len){
+  if(!buf || !len) return 0;
+  B in_str = 0;
+  for(size_t i=0;i<len;i++){
+    C c = buf[i];
+    if(!in_str){
+      if(c=='/' && (i+1)<len && buf[i+1]=='/'){
+        i += 2;
+        while(i<len && buf[i] != '\n') i++;
+        continue;
+      }
+      if(c=='\"'){ in_str = 1; continue; }
+    }else{
+      if(c=='\"'){ in_str = 0; continue; }
+    }
+  }
+  return in_str;
+}
+
+static C* read_repl_stmt(FILE* in, B* exit_repl){
+  if(exit_repl) *exit_repl = 0;
+  C* buf = read_line(in);
+  if(!buf) return 0;
+
+  if(exit_repl && strcmp(buf, "\\\\") == 0){
+    *exit_repl = 1;
+    return buf;
+  }
+
+  size_t len = strlen(buf);
+  while(repl_buf_in_open_string(buf, len)){
+    printf(" |");
+    C* next = read_line(in);
+    if(!next) break;
+    size_t next_len = strlen(next);
+
+    Q need = (Q)(len + 1 + next_len + 1);
+    C* nb = (C*)os_heap_realloc(buf, need);
+    if(!nb){ os_heap_free(buf); os_heap_free(next); return 0; }
+    buf = nb;
+    buf[len] = '\n';
+    if(next_len) memcpy(buf + len + 1, next, next_len);
+    len += 1 + next_len;
+    buf[len] = 0;
+    os_heap_free(next);
+  }
+
+  return buf;
+}
+
 I main(I argc, C** argv){
   const C* script = 0;
   B usage = 0;
@@ -4890,9 +5008,10 @@ I main(I argc, C** argv){
 
   while (1) {
     printf(" ");
-    C* line = read_line(stdin);
+    B exit_repl = 0;
+    C* line = read_repl_stmt(stdin, &exit_repl);
     if(!line) break;
-    if(strcmp(line, "\\\\") == 0){ os_heap_free(line); break; }
+    if(exit_repl){ os_heap_free(line); break; }
     if(!*line){ os_heap_free(line); continue; }
     if(0==SP && 0==LP){
       for(D i=0;i<n(pi(SC[0],1));i++){

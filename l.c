@@ -269,7 +269,6 @@ B t(Q q){                                                                     //
   return tag;
 }
 static inline B is_err(Q q){ return q && t(q)==T_ERR; }
-static inline B is_ctl(Q q){ return q && t(q)==T_CTL; }
 B sh(Q q){return ii(q)?0:ptr(q)[1];}                                           // shape    from header
 B ls(Q q){return ii(q)?3:ptr(q)[2];}                                           // logeltsz from header EDGE CASE: should type 0 automatically return 3 here????
 B sz(Q q){return 1<<ls(q);}                                                    // bytesz   from logeltsz
@@ -289,7 +288,7 @@ static Q eval_code_file(const char* fn);
 static Q eval_code_tape(const C* src, D len);
 
 Q qbz(Q bz){return ((bz+15)/16)*2;}                                             // forward declare refcount helpers
-Q hz(){return sizeof(Q)*6;}                                                     // header size
+Q hz(void){return sizeof(Q)*6;}                                                 // header size
 D cn(B t,B s,D n){                                                              // capacity from type,shape,n
   if(0==s){return 1;}                                                           // heap allocated atom. there is only one element.
   if(2==s){return 3;}                                                           // we know that there are only ever 3 elements in a dictionary allocation.
@@ -947,7 +946,7 @@ static Q dict_rehash(Q d, D new_cap){
 }
 Q parse_b(C* s, D len, D base);
 static inline Q sym_intern_bytes(const C* bytes, D len);
-static void ft_refresh_dict(){
+static void ft_refresh_dict(void){
   if(!G) return;
   Q ft = dk(G, sym_intern_bytes("FT", 2));
   if(is_err(ft) || is_nf(ft)) return;
@@ -1495,7 +1494,7 @@ void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
   #error "Unsupported platform (no platform layer implementation)"
 #endif
 
-D find_empty_ft_slot(){
+D find_empty_ft_slot(void){
   D idx = n(FT_addr);
   for(D i=0; i<idx; i++){
     if(pi(FT_addr, i) == 0) return i;
@@ -1771,7 +1770,6 @@ Q file_read_log(Q f){
   while(offset < used_size){
     Q* obj_header = (Q*)( (B*)base_addr + offset );
     
-    B type = obj_header[0];
     B ls = obj_header[2];
     D c = obj_header[5];
 
@@ -2204,12 +2202,6 @@ static inline double num_f64_elem(Q q, D i){
     return tq==T_FLT ? f64_from_bits(bits) : (double)(J)bits;
   }
   return num_f64_atom(q);
-}
-
-static inline Q vne(Q ar, B t, B z, D n){
-  // Allocate an exact-capacity value vector (no growth slack). Great for numeric kernels.
-  D c = n ? n : 1;
-  return tsna(ar, t, 1, z, n, c);
 }
 
 static inline Q vne_u(Q ar, B t, B z, D n){
@@ -3548,37 +3540,43 @@ static Q lex_from_src(const C* src, D len, B use_new_lexer){
   return toks_tape_to_list(toks);
 }
 
-Q lex(B A, Q v, Q a, Q w){
-  (void)A; (void)v; (void)a;
+static inline Q qchar_src(Q w, const C** src_out, D* len_out, C* one_out){
+  if(!src_out || !len_out || !one_out) return ae(2);
   if(t(w)!=6) return ae(2);
   if(sh(w)==0){
-    C c = (C)ra(w);
-    return lex_from_src(&c, 1, 0);
+    *one_out = (C)ra(w);
+    *src_out = one_out;
+    *len_out = 1;
+    return 0;
   }
   if(sh(w)!=1) return ae(1);
-  return lex_from_src((const C*)p(w), n(w), 0);
+  *src_out = (const C*)p(w);
+  *len_out = n(w);
+  return 0;
+}
+
+Q lex(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  const C* src = 0; D len = 0; C one = 0;
+  Q err = qchar_src(w, &src, &len, &one);
+  if(err) return err;
+  return lex_from_src(src, len, 0);
 }
 
 Q lex2(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a;
-  if(t(w)!=6) return ae(2);
-  if(sh(w)==0){
-    C c = (C)ra(w);
-    return lex_from_src(&c, 1, 1);
-  }
-  if(sh(w)!=1) return ae(1);
-  return lex_from_src((const C*)p(w), n(w), 1);
+  const C* src = 0; D len = 0; C one = 0;
+  Q err = qchar_src(w, &src, &len, &one);
+  if(err) return err;
+  return lex_from_src(src, len, 1);
 }
 
 Q ev(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a;
-  if(t(w)!=6) return ae(2);
-  if(sh(w)==0){
-    C c = (C)ra(w);
-    return eval_code_tape(&c, 1);
-  }
-  if(sh(w)!=1) return ae(1);
-  return eval_code_tape((const C*)p(w), n(w));
+  const C* src = 0; D len = 0; C one = 0;
+  Q err = qchar_src(w, &src, &len, &one);
+  if(err) return err;
+  return eval_code_tape(src, len);
 }
 
 Q bench(B A, Q v, Q a, Q w){
@@ -4525,14 +4523,7 @@ static inline B dump_tokens_enabled(void){
   return L_opts.dump_tokens;
 }
 
-static Q eval_code_tape(const C* src, D len){
-  if(!src || !len) return 0;
-  dbg_write_startup("dbg: eval_code_tape enter\n");
-  if(len >= 3 && (B)src[0]==0xEF && (B)src[1]==0xBB && (B)src[2]==0xBF){ src += 3; len -= 3; } // skip UTF-8 BOM
-  Q* tokens_base = lx_len(src, len);
-  dbg_write_startup("dbg: eval_code_tape lexed\n");
-  if(!tokens_base) return ae(2);
-  if(dump_tokens_enabled()) dump_token_tape(tokens_base);
+static Q eval_lexed_tokens(Q* tokens_base){
   Q* tokens = tokens_base;
   Q r = tsna(0,4,1,3,0,0); // missing
   for(;;){
@@ -4553,6 +4544,18 @@ static Q eval_code_tape(const C* src, D len){
       break;
     }
   }
+  return r;
+}
+
+static Q eval_code_tape(const C* src, D len){
+  if(!src || !len) return 0;
+  dbg_write_startup("dbg: eval_code_tape enter\n");
+  if(len >= 3 && (B)src[0]==0xEF && (B)src[1]==0xBB && (B)src[2]==0xBF){ src += 3; len -= 3; } // skip UTF-8 BOM
+  Q* tokens_base = lx_len(src, len);
+  dbg_write_startup("dbg: eval_code_tape lexed\n");
+  if(!tokens_base) return ae(2);
+  if(dump_tokens_enabled()) dump_token_tape(tokens_base);
+  Q r = eval_lexed_tokens(tokens_base);
   os_heap_free(tokens_base);
   return r;
 }
@@ -4861,30 +4864,6 @@ lx_name_done:;
 Q* lx2_len(const C* b, D l){
   return lx_len(b, l);
 }
-Q* lx(C*b){return lx_len(b,(D)strlen(b));}
-
-C* sub(C* s){
-  static C b[256];
-  C* d=b; C* p=s;
-  while(*p){
-    if(p[0]=='-'&&p[1]=='>'){strcpy(d,"→");d+=3;p+=2;}
-    else if(p[0]=='<'&&p[1]=='-'){strcpy(d,"←");d+=3;p+=2;}
-    else if(p[0]=='<'&&p[1]=='o'){strcpy(d,"↺");d+=3;p+=2;}
-    else if(p[0]=='o'&&p[1]=='>'){strcpy(d,"↻");d+=3;p+=2;}
-    else if(p[0]=='<'&&p[1]=='\''){strcpy(d,"↰");d+=3;p+=2;}
-    else if(p[0]=='\''&&p[1]=='>'){strcpy(d,"↱");d+=3;p+=2;}
-    else if(p[0]=='\''&&p[1]=='v'){strcpy(d,"↓");d+=3;p+=2;}
-    else if(p[0]=='\''&&p[1]=='^'){strcpy(d,"↑");d+=3;p+=2;}
-    else if(p[0]=='/'&&p[1]=='\''){strcpy(d,"↿");d+=3;p+=2;}
-    else if(p[0]=='\\'&&p[1]=='\''){strcpy(d,"⇃");d+=3;p+=2;}
-    else if(p[0]=='<'&&p[1]=='p'){strcpy(d,"↫");d+=3;p+=2;}
-    else if(p[0]=='q'&&p[1]=='>'){strcpy(d,"↬");d+=3;p+=2;}
-    else {*d++=*p++;}
-  }
-  *d=0;
-  return b;
-}
-
 static C* read_line(FILE* in){
   if(!in) return 0;
   size_t cap = 256;
@@ -5022,26 +5001,7 @@ I main(I argc, C** argv){
      } // reset THI only if evaluation takes us back to the global scope. 
     Q* tokens_base = lx_len(line, (D)strlen(line));
     if(!tokens_base){ os_heap_free(line); pr(ae(2)); printf("\n"); continue; }
-    Q* tokens = tokens_base;
-    Q r = tsna(0,4,1,3,0,0);                                                    // missing
-    for(;;){
-      if(LP>0){
-        C tc = LC[LP] ? LC[LP] : ')';
-        r = E(&tokens, tc, 1);                                                  // evaluate inside the open builder
-        if(LP>0 && LK[LP]==1 && !(*tokens && 34==t(*tokens) && tc==dc(*tokens))){
-          r = apply_brackets(LBASE[LP], NL[LP]);                                 // show current postfix result while unbalanced
-        }
-        if(*tokens && 34==t(*tokens) && tc==dc(*tokens)){
-          r = ecl(&tokens);                                                     // close the open builder
-          if(*tokens) continue;                                                 // trailing tokens may still be in an outer context
-        }
-        break;
-      }else{
-        Q r2 = E(&tokens,'\0',0);
-        if(!(4==t(r2) && 0==n(r2))) r = r2;
-        break;
-      }
-    }
+    Q r = eval_lexed_tokens(tokens_base);
     os_heap_free(tokens_base);
     pr(r);printf("\n");
     os_heap_free(line);

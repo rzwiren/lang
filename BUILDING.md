@@ -8,7 +8,7 @@ The canonical commands (the ones to prefer) are listed first.
 Run from a Visual Studio / Build Tools developer prompt so `cl.exe` is on `PATH`:
 
 ```powershell
-cl l.c /GL /O1 /Gy /MD /DNDEBUG /link /LTCG /OPT:REF /OPT:ICF
+cl l.c /GL /O1 /Gy /MD /DNDEBUG /link /LTCG /OPT:REF /OPT:ICF Ws2_32.lib
 ```
 
 Output: `l.exe` (plus `l.obj`, `l.pdb`, etc. depending on your settings).

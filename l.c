@@ -46,16 +46,24 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include <errno.h>
 #include <math.h>
 #include <time.h>
 #if L_OS_WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN 1
+  #endif
+  #include <winsock2.h>
   #include <windows.h>
   #if L_CC_MSVC
     #include <intrin.h>
   #endif
 #elif L_OS_POSIX
   #include <sys/mman.h>
+  #include <sys/types.h>
+  #include <sys/socket.h>
+  #include <netinet/in.h>
   #include <fcntl.h>
   #include <unistd.h>
   #include <sys/stat.h>
@@ -94,6 +102,13 @@ static void platform_init_stdout_utf8_if_console(void);
 static B platform_stdin_is_console(void);
 static void platform_write_stderr_bytes(const char* s, size_t n);
 static Q platform_now_ns_u64(void);
+static B platform_net_init_once(void);
+static B platform_tcp_listen_u16(W port, Q* out_listener);
+static B platform_tcp_accept(Q listener, Q* out_conn);
+static B platform_tcp_connect_ipv4(W port, B ip0, B ip1, B ip2, B ip3, Q* out_conn);
+static I platform_tcp_recv(Q conn, void* buf, D cap);
+static I platform_tcp_send(Q conn, const void* buf, D len);
+static void platform_tcp_close(Q conn);
 
 // -----------------------------------------------------------------------------
 // Compiler helpers (hide compiler/arch intrinsics behind a tiny API).
@@ -1271,6 +1286,107 @@ static Q platform_now_ns_u64(void){
   return sec*1000000000ULL + (rem*1000000000ULL)/qpc_freq;
 }
 
+static B platform_net_init_once(void){
+  static B started = 0;
+  if(started) return 1;
+  WSADATA wsa;
+  int rc = WSAStartup(MAKEWORD(2,2), &wsa);
+  if(rc != 0) return 0;
+  started = 1;
+  return 1;
+}
+
+static B platform_tcp_listen_u16(W port, Q* out_listener){
+  if(!out_listener) return 0;
+  *out_listener = 0;
+  if(!platform_net_init_once()) return 0;
+  SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if(s == INVALID_SOCKET) return 0;
+
+  int on = 1;
+  (void)setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, (int)sizeof(on));
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  ((unsigned char*)&addr.sin_port)[0] = (unsigned char)((port >> 8) & 0xFF);
+  ((unsigned char*)&addr.sin_port)[1] = (unsigned char)(port & 0xFF);
+  addr.sin_addr.s_addr = 0; // 0.0.0.0
+
+  if(bind(s, (struct sockaddr*)&addr, (int)sizeof(addr)) == SOCKET_ERROR){
+    closesocket(s);
+    return 0;
+  }
+  if(listen(s, 16) == SOCKET_ERROR){
+    closesocket(s);
+    return 0;
+  }
+
+  *out_listener = (Q)(uintptr_t)s;
+  return 1;
+}
+
+static B platform_tcp_accept(Q listener, Q* out_conn){
+  if(!out_conn) return 0;
+  *out_conn = 0;
+  if(!platform_net_init_once()) return 0;
+  SOCKET ls = (SOCKET)(uintptr_t)listener;
+  SOCKET cs = accept(ls, 0, 0);
+  if(cs == INVALID_SOCKET) return 0;
+  *out_conn = (Q)(uintptr_t)cs;
+  return 1;
+}
+
+static B platform_tcp_connect_ipv4(W port, B ip0, B ip1, B ip2, B ip3, Q* out_conn){
+  if(!out_conn) return 0;
+  *out_conn = 0;
+  if(!platform_net_init_once()) return 0;
+  SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if(s == INVALID_SOCKET) return 0;
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  ((unsigned char*)&addr.sin_port)[0] = (unsigned char)((port >> 8) & 0xFF);
+  ((unsigned char*)&addr.sin_port)[1] = (unsigned char)(port & 0xFF);
+  ((unsigned char*)&addr.sin_addr.s_addr)[0] = (unsigned char)ip0;
+  ((unsigned char*)&addr.sin_addr.s_addr)[1] = (unsigned char)ip1;
+  ((unsigned char*)&addr.sin_addr.s_addr)[2] = (unsigned char)ip2;
+  ((unsigned char*)&addr.sin_addr.s_addr)[3] = (unsigned char)ip3;
+
+  if(connect(s, (struct sockaddr*)&addr, (int)sizeof(addr)) == SOCKET_ERROR){
+    closesocket(s);
+    return 0;
+  }
+
+  *out_conn = (Q)(uintptr_t)s;
+  return 1;
+}
+
+static I platform_tcp_recv(Q conn, void* buf, D cap){
+  if(!buf || cap==0) return 0;
+  if(!platform_net_init_once()) return -1;
+  SOCKET s = (SOCKET)(uintptr_t)conn;
+  int icap = (cap > (D)0x7FFFFFFF) ? 0x7FFFFFFF : (int)cap;
+  int r = recv(s, (char*)buf, icap, 0);
+  return (r == SOCKET_ERROR) ? -1 : (I)r;
+}
+
+static I platform_tcp_send(Q conn, const void* buf, D len){
+  if(!buf || len==0) return 0;
+  if(!platform_net_init_once()) return -1;
+  SOCKET s = (SOCKET)(uintptr_t)conn;
+  int ilen = (len > (D)0x7FFFFFFF) ? 0x7FFFFFFF : (int)len;
+  int r = send(s, (const char*)buf, ilen, 0);
+  return (r == SOCKET_ERROR) ? -1 : (I)r;
+}
+
+static void platform_tcp_close(Q conn){
+  if(!platform_net_init_once()) return;
+  SOCKET s = (SOCKET)(uintptr_t)conn;
+  if(s != INVALID_SOCKET) closesocket(s);
+}
+
 void* os_map(char* fn, Q* sz, Q* h_out){
   void* addr = 0;
   int is_new = 0;
@@ -1392,6 +1508,97 @@ static Q platform_now_ns_u64(void){
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (Q)ts.tv_sec*1000000000ULL + (Q)ts.tv_nsec;
+}
+
+static B platform_net_init_once(void){
+  return 1;
+}
+
+static B platform_tcp_listen_u16(W port, Q* out_listener){
+  if(!out_listener) return 0;
+  *out_listener = 0;
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if(s < 0) return 0;
+
+  int on = 1;
+  (void)setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, (socklen_t)sizeof(on));
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  ((unsigned char*)&addr.sin_port)[0] = (unsigned char)((port >> 8) & 0xFF);
+  ((unsigned char*)&addr.sin_port)[1] = (unsigned char)(port & 0xFF);
+  addr.sin_addr.s_addr = 0;
+
+  if(bind(s, (struct sockaddr*)&addr, (socklen_t)sizeof(addr)) < 0){
+    close(s);
+    return 0;
+  }
+  if(listen(s, 16) < 0){
+    close(s);
+    return 0;
+  }
+
+  *out_listener = (Q)s;
+  return 1;
+}
+
+static B platform_tcp_accept(Q listener, Q* out_conn){
+  if(!out_conn) return 0;
+  *out_conn = 0;
+  int ls = (int)listener;
+  int cs = accept(ls, 0, 0);
+  if(cs < 0) return 0;
+  *out_conn = (Q)cs;
+  return 1;
+}
+
+static B platform_tcp_connect_ipv4(W port, B ip0, B ip1, B ip2, B ip3, Q* out_conn){
+  if(!out_conn) return 0;
+  *out_conn = 0;
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if(s < 0) return 0;
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  ((unsigned char*)&addr.sin_port)[0] = (unsigned char)((port >> 8) & 0xFF);
+  ((unsigned char*)&addr.sin_port)[1] = (unsigned char)(port & 0xFF);
+  ((unsigned char*)&addr.sin_addr.s_addr)[0] = (unsigned char)ip0;
+  ((unsigned char*)&addr.sin_addr.s_addr)[1] = (unsigned char)ip1;
+  ((unsigned char*)&addr.sin_addr.s_addr)[2] = (unsigned char)ip2;
+  ((unsigned char*)&addr.sin_addr.s_addr)[3] = (unsigned char)ip3;
+
+  if(connect(s, (struct sockaddr*)&addr, (socklen_t)sizeof(addr)) < 0){
+    close(s);
+    return 0;
+  }
+
+  *out_conn = (Q)s;
+  return 1;
+}
+
+static I platform_tcp_recv(Q conn, void* buf, D cap){
+  if(!buf || cap==0) return 0;
+  int s = (int)conn;
+  size_t sc = (size_t)cap;
+  if(sc > (size_t)0x7FFFFFFF) sc = (size_t)0x7FFFFFFF;
+  ssize_t r = recv(s, buf, sc, 0);
+  return (r < 0) ? -1 : (I)r;
+}
+
+static I platform_tcp_send(Q conn, const void* buf, D len){
+  if(!buf || len==0) return 0;
+  int s = (int)conn;
+  size_t sl = (size_t)len;
+  if(sl > (size_t)0x7FFFFFFF) sl = (size_t)0x7FFFFFFF;
+  ssize_t r = send(s, buf, sl, 0);
+  return (r < 0) ? -1 : (I)r;
+}
+
+static void platform_tcp_close(Q conn){
+  int s = (int)conn;
+  if(s >= 0) close(s);
 }
 
 void* os_map(char* fn, Q* sz, Q* h_out){
@@ -1671,6 +1878,374 @@ Q textd(B A, Q v, Q a, Q w){
   return text_write(a, w);
 }
 
+// -----------------------------------------------------------------------------
+// Networking / IPC (minimal TCP + barebones HTTP)
+//
+// Goals:
+// - Provide a tiny socket surface for inter-process communication.
+// - Keep OS usage minimal (WinSock / POSIX sockets only).
+// - Avoid libc heap allocators (use Lang arenas or os_heap_* as needed).
+//
+// Verbs:
+// - tcplisten  port                 -> listener_handle
+// - tcpaccept  listener_handle      -> conn_handle
+// - a tcprecv  conn_handle          -> charvec (up to a bytes)
+// - conn tcpsend data               -> bytes_sent (best-effort "send all")
+// - tcpclose   handle               -> missing
+// - host tcpconnect port            -> conn_handle  (IPv4 dotted decimal only)
+// - port web body                   -> (blocks forever; serves fixed 200 OK)
+// - port webbg body                 -> server_handle (runs in background; REPL continues)
+// - webstop server_handle           -> missing
+// -----------------------------------------------------------------------------
+
+static inline B net_qchar_src(Q w, const C** src_out, D* len_out, C* one_out){
+  if(!src_out || !len_out || !one_out) return 0;
+  if(t(w)!=T_CHAR) return 0;
+  if(sh(w)==0){
+    *one_out = (C)(ip(w) ? pi(w,0) : di(w));
+    *src_out = one_out;
+    *len_out = 1;
+    return 1;
+  }
+  if(sh(w)!=1) return 0;
+  *src_out = (const C*)p(w);
+  *len_out = n(w);
+  return 1;
+}
+
+static inline B net_qint_to_u16(Q w, W* out){
+  if(!out) return 0;
+  if(t(w)!=T_INT || sh(w)!=0) return 0;
+  J v = (J)(ip(w) ? pi(w,0) : di_int(w));
+  if(v < 0 || v > 65535) return 0;
+  *out = (W)v;
+  return 1;
+}
+
+static inline B net_qint_to_u32(Q w, D* out){
+  if(!out) return 0;
+  if(t(w)!=T_INT || sh(w)!=0) return 0;
+  J v = (J)(ip(w) ? pi(w,0) : di_int(w));
+  if(v < 0 || v > 0x7FFFFFFFLL) return 0;
+  *out = (D)v;
+  return 1;
+}
+
+static inline B net_qint_to_handle(Q w, Q* out){
+  if(!out) return 0;
+  if(t(w)!=T_INT || sh(w)!=0) return 0;
+  *out = ip(w) ? pi(w,0) : di_int(w);
+  return 1;
+}
+
+static B net_parse_ipv4_dotted(const C* s, D len, B out_ip[4]){
+  if(!s || len<=0 || !out_ip) return 0;
+  D part = 0;
+  unsigned v = 0;
+  B have = 0;
+  for(D i=0;i<len;i++){
+    C c = s[i];
+    if(c>='0' && c<='9'){
+      have = 1;
+      v = v*10u + (unsigned)(c - '0');
+      if(v > 255u) return 0;
+      continue;
+    }
+    if(c=='.'){
+      if(!have || part >= 3) return 0;
+      out_ip[part++] = (B)v;
+      v = 0;
+      have = 0;
+      continue;
+    }
+    return 0;
+  }
+  if(!have || part != 3) return 0;
+  out_ip[3] = (B)v;
+  return 1;
+}
+
+static B net_send_all(Q conn, const void* buf, D len){
+  const B* p0 = (const B*)buf;
+  D off = 0;
+  while(off < len){
+    I r = platform_tcp_send(conn, p0 + off, len - off);
+    if(r <= 0) return 0;
+    off += (D)r;
+  }
+  return 1;
+}
+
+typedef struct {
+  B running;
+  volatile B stop;
+  Q listener;
+#if L_OS_WIN32
+  HANDLE thread;
+#endif
+  C* body;
+  D body_len;
+  C hdr[256];
+  D hdr_len;
+} WebBgState;
+
+static WebBgState WEBBG = {0};
+
+#if L_OS_WIN32
+static DWORD WINAPI webbg_thread_main(LPVOID param){
+  WebBgState* st = (WebBgState*)param;
+  C reqbuf[4096];
+  for(;;){
+    if(st->stop) break;
+    Q cs = 0;
+    if(!platform_tcp_accept(st->listener, &cs)){
+      if(st->stop) break;
+      continue;
+    }
+    (void)platform_tcp_recv(cs, reqbuf, (D)sizeof(reqbuf));
+    if(st->hdr_len) (void)net_send_all(cs, st->hdr, st->hdr_len);
+    if(st->body_len && st->body) (void)net_send_all(cs, st->body, st->body_len);
+    platform_tcp_close(cs);
+  }
+  return 0;
+}
+#endif
+
+static Q v_tcplisten(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  W port = 0;
+  if(!net_qint_to_u16(w, &port)) return ae(2);
+  Q ls = 0;
+  if(!platform_tcp_listen_u16(port, &ls)) return ae(2);
+  return an((J)ls);
+}
+
+static Q v_tcpaccept(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  Q ls = 0;
+  if(!net_qint_to_handle(w, &ls)) return ae(2);
+  Q cs = 0;
+  if(!platform_tcp_accept(ls, &cs)) return ae(2);
+  return an((J)cs);
+}
+
+static Q v_tcprecv(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+  D cap = 0;
+  if(!net_qint_to_u32(a, &cap)) return ae(2);
+  Q cs = 0;
+  if(!net_qint_to_handle(w, &cs)) return ae(2);
+
+  if(cap == 0) return vna(0, T_CHAR, 0, 0);
+  if(cap > 1024u*1024u) cap = 1024u*1024u; // hard cap: 1 MiB per recv
+
+  void* tmp = os_heap_alloc((Q)cap);
+  if(!tmp) return ae(2);
+  I r = platform_tcp_recv(cs, tmp, cap);
+  if(r <= 0){
+    os_heap_free(tmp);
+    return vna(0, T_CHAR, 0, 0);
+  }
+
+  Q z = vna(0, T_CHAR, 0, (D)r);
+  memcpy(p(z), tmp, (size_t)r);
+  os_heap_free(tmp);
+  return z;
+}
+
+static Q v_tcpsend(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+  Q cs = 0;
+  if(!net_qint_to_handle(a, &cs)) return ae(2);
+
+  const C* src = 0;
+  D len = 0;
+  C one = 0;
+  if(!net_qchar_src(w, &src, &len, &one)) return ae(2);
+  if(len < 0) return ae(2);
+  if(len == 0) return an(0);
+  if(!net_send_all(cs, src, (D)len)) return ae(2);
+  return an((J)len);
+}
+
+static Q v_tcpclose(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  Q h = 0;
+  if(!net_qint_to_handle(w, &h)) return ae(2);
+  platform_tcp_close(h);
+  return mis();
+}
+
+static Q v_tcpconnect(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+  const C* host = 0;
+  D host_len = 0;
+  C one = 0;
+  if(!net_qchar_src(a, &host, &host_len, &one)) return ae(2);
+  W port = 0;
+  if(!net_qint_to_u16(w, &port)) return ae(2);
+
+  B ip[4];
+  if(!net_parse_ipv4_dotted(host, host_len, ip)) return ae(2);
+  Q cs = 0;
+  if(!platform_tcp_connect_ipv4(port, ip[0], ip[1], ip[2], ip[3], &cs)) return ae(2);
+  return an((J)cs);
+}
+
+static Q v_web(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+  W port = 0;
+  if(!net_qint_to_u16(a, &port)) return ae(2);
+
+  const C* body = 0;
+  D body_len = 0;
+  C one = 0;
+  if(!net_qchar_src(w, &body, &body_len, &one)) return ae(2);
+  if(body_len < 0) return ae(2);
+
+  Q ls = 0;
+  if(!platform_tcp_listen_u16(port, &ls)) return ae(2);
+
+  C hdr[256];
+  D hlen = 0;
+  {
+    const char* pfx = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
+    const char* sfx = "\r\nConnection: close\r\n\r\n";
+    size_t pfx_len = strlen(pfx);
+    size_t sfx_len = strlen(sfx);
+    if(pfx_len + sfx_len + 32 >= sizeof(hdr)) { platform_tcp_close(ls); return ae(2); }
+    memcpy(hdr + hlen, pfx, pfx_len); hlen += (D)pfx_len;
+
+    // content-length decimal
+    C tmp[32];
+    D ti = 0;
+    Q x = (Q)(body_len < 0 ? 0 : body_len);
+    do{
+      Q q = x / 10ULL;
+      Q r = x - q*10ULL;
+      tmp[ti++] = (C)('0' + (C)r);
+      x = q;
+    }while(x && ti < (D)sizeof(tmp));
+    for(D i=ti-1;i<(D)ti;i--) hdr[hlen++] = tmp[i];
+
+    memcpy(hdr + hlen, sfx, sfx_len); hlen += (D)sfx_len;
+  }
+
+  C reqbuf[4096];
+  for(;;){
+    Q cs = 0;
+    if(!platform_tcp_accept(ls, &cs)) continue;
+    I r = platform_tcp_recv(cs, reqbuf, (D)sizeof(reqbuf));
+    if(r <= 0){ platform_tcp_close(cs); continue; }
+    if(!net_send_all(cs, hdr, hlen)) { platform_tcp_close(cs); continue; }
+    if(body_len && !net_send_all(cs, body, (D)body_len)) { platform_tcp_close(cs); continue; }
+    platform_tcp_close(cs);
+  }
+}
+
+static Q v_webbg(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+#if !L_OS_WIN32
+  (void)a; (void)w;
+  return ae(2);
+#else
+  if(WEBBG.running) return ae(2);
+
+  W port = 0;
+  if(!net_qint_to_u16(a, &port)) return ae(2);
+
+  const C* body = 0;
+  D body_len = 0;
+  C one = 0;
+  if(!net_qchar_src(w, &body, &body_len, &one)) return ae(2);
+  if(body_len < 0) return ae(2);
+
+  Q ls = 0;
+  if(!platform_tcp_listen_u16(port, &ls)) return ae(2);
+
+  WEBBG.body = 0;
+  WEBBG.body_len = body_len;
+  if(body_len){
+    WEBBG.body = (C*)os_heap_alloc((Q)body_len);
+    if(!WEBBG.body){ platform_tcp_close(ls); return ae(2); }
+    memcpy(WEBBG.body, body, (size_t)body_len);
+  }
+
+  WEBBG.hdr_len = 0;
+  {
+    const char* pfx = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
+    const char* sfx = "\r\nConnection: close\r\n\r\n";
+    size_t pfx_len = strlen(pfx);
+    size_t sfx_len = strlen(sfx);
+    if(pfx_len + sfx_len + 32 >= sizeof(WEBBG.hdr)){
+      if(WEBBG.body) os_heap_free(WEBBG.body);
+      platform_tcp_close(ls);
+      return ae(2);
+    }
+    memcpy(WEBBG.hdr + WEBBG.hdr_len, pfx, pfx_len); WEBBG.hdr_len += (D)pfx_len;
+
+    C tmp[32];
+    D ti = 0;
+    Q x = (Q)(body_len < 0 ? 0 : body_len);
+    do{
+      Q q = x / 10ULL;
+      Q r = x - q*10ULL;
+      tmp[ti++] = (C)('0' + (C)r);
+      x = q;
+    }while(x && ti < (D)sizeof(tmp));
+    for(D i=ti-1;i<(D)ti;i--) WEBBG.hdr[WEBBG.hdr_len++] = tmp[i];
+
+    memcpy(WEBBG.hdr + WEBBG.hdr_len, sfx, sfx_len); WEBBG.hdr_len += (D)sfx_len;
+  }
+
+  WEBBG.listener = ls;
+  WEBBG.stop = 0;
+  WEBBG.thread = CreateThread(0, 0, webbg_thread_main, &WEBBG, 0, 0);
+  if(!WEBBG.thread){
+    WEBBG.stop = 1;
+    platform_tcp_close(ls);
+    if(WEBBG.body) os_heap_free(WEBBG.body);
+    WEBBG.body = 0;
+    WEBBG.body_len = 0;
+    WEBBG.listener = 0;
+    return ae(2);
+  }
+
+  WEBBG.running = 1;
+  return an((J)ls);
+#endif
+}
+
+static Q v_webstop(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+#if !L_OS_WIN32
+  (void)w;
+  return ae(2);
+#else
+  Q h = 0;
+  if(!net_qint_to_handle(w, &h)) return ae(2);
+  (void)h;
+  if(!WEBBG.running) return mis();
+
+  WEBBG.stop = 1;
+  if(WEBBG.listener) platform_tcp_close(WEBBG.listener);
+  if(WEBBG.thread){
+    WaitForSingleObject(WEBBG.thread, INFINITE);
+    CloseHandle(WEBBG.thread);
+  }
+  WEBBG.thread = 0;
+  WEBBG.listener = 0;
+  WEBBG.running = 0;
+
+  if(WEBBG.body) os_heap_free(WEBBG.body);
+  WEBBG.body = 0;
+  WEBBG.body_len = 0;
+  WEBBG.hdr_len = 0;
+
+  return mis();
+#endif
+}
+
 Q file_read(Q f){
   D fid = AR_FID(di(f));
   Q root = *(Q*)ft_addrp()[fid];
@@ -1763,7 +2338,7 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 40
+#define VTZ 49
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -3549,8 +4124,8 @@ Q ticks(B A, Q v, Q a, Q w);
 Q ev(B A, Q v, Q a, Q w);
 Q bench(B A, Q v, Q a, Q w);
 Q aply(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd,0,0};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm,reprm,prm};
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd,0,0,  0,0,v_tcprecv,v_tcpsend,0,v_tcpconnect,v_web,v_webbg,0};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm,reprm,prm,  v_tcplisten,v_tcpaccept,0,0,v_tcpclose,0,0,0,v_webstop};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -3593,6 +4168,15 @@ static const BM VBM[VTZ]={
   /* 37 */ NB, // text
   /* 38 */ NB, // repr
   /* 39 */ NB, // pr
+  /* 40 */ NB, // tcplisten
+  /* 41 */ NB, // tcpaccept
+  /* 42 */ NB, // tcprecv
+  /* 43 */ NB, // tcpsend
+  /* 44 */ NB, // tcpclose
+  /* 45 */ NB, // tcpconnect
+  /* 46 */ NB, // web
+  /* 47 */ NB, // webbg
+  /* 48 */ NB, // webstop
 };
 
 static const BM VBD[VTZ]={
@@ -3636,8 +4220,17 @@ static const BM VBD[VTZ]={
   /* 37 */ NB, // text
   /* 38 */ NB, // repr
   /* 39 */ NB, // pr
+  /* 40 */ NB, // tcplisten
+  /* 41 */ NB, // tcpaccept
+  /* 42 */ NB, // tcprecv
+  /* 43 */ NB, // tcpsend
+  /* 44 */ NB, // tcpclose
+  /* 45 */ NB, // tcpconnect
+  /* 46 */ NB, // web
+  /* 47 */ NB, // webbg
+  /* 48 */ NB, // webstop
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text","repr","pr"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text","repr","pr","tcplisten","tcpaccept","tcprecv","tcpsend","tcpclose","tcpconnect","web","webbg","webstop"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};

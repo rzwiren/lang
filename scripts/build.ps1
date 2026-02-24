@@ -31,7 +31,6 @@ $outExe = Join-Path $buildDir 'l.exe'
   /GL /O1 /Gy /MD /DNDEBUG `
   /Fe:$outExe `
   /Fo"$buildDir\\" `
-  /link /LTCG /OPT:REF /OPT:ICF
+  /link /LTCG /OPT:REF /OPT:ICF Ws2_32.lib
 
 Write-Host "Built $outExe"
-

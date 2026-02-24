@@ -226,6 +226,11 @@ Q* ptr(Q q){
 B ip(Q q){return q&&!(15&q);}                                                 // Is this Q a pointer? nonzero in low 4 bits means atom
 B itp(Q q){return ip(q) && ha(q)==0;}                                         // Is this Q a pointer to the bump allocated region?
 B*p(Q q){return (B*)(ptr(q)+6);}                                              // pointers point at header after decoding and need to be adjusted to point at the data
+static inline Q* ft_addrp(void){ return (Q*)p(FT_addr); }
+static inline Q* ft_szp(void){ return (Q*)p(FT_sz); }
+static inline Q* ft_capp(void){ return (Q*)p(FT_cap); }
+static inline Q* ft_hp(void){ return (Q*)p(FT_h); }
+static inline Q* ft_fnp(void){ return (Q*)p(FT_fn); }
 Q di(Q q){return q>>4;}                                                       // shift out the flags. decodes small integers
 Q dv(Q q){return q>>6;}                                                       // verbs are grammatical type, subtype 0. payload in high 59 bits
 Q da(Q q){return q>>6;}
@@ -437,10 +442,10 @@ void os_truncate(Q h, Q sz);
 void* os_remap(void* addr, Q old_cap, Q new_cap, Q h);
 Q filebumpalloc(B t, B s, B z, D n, D c, Q ar) {
     D fid = AR_FID(ar);
-    Q* addrs = (Q*)p(FT_addr);
-    Q* szs   = (Q*)p(FT_sz);
-    Q* caps  = (Q*)p(FT_cap);
-    Q* hs    = (Q*)p(FT_h);
+    Q* addrs = ft_addrp();
+    Q* szs   = ft_szp();
+    Q* caps  = ft_capp();
+    Q* hs    = ft_hp();
 
     Q bytes_needed = az(z, c);
     bytes_needed = (bytes_needed + 15) & ~15; // align to 16 bytes
@@ -493,6 +498,7 @@ Q lna(Q ar, D n){ return vna(ar, 0, 3, n); }
 Q vca(Q ar, B t, B z, D c){ return tsna(ar, t, 1, z, 0, c); }
 Q lca(Q ar, D c){ return vca(ar, 0, 3, c); }
 Q ln(D n){return vna(0,0,3,n);}
+static inline Q mis(void){ return tsna(0,4,1,3,0,0); }
 
 void pr(Q q);
 void zid(Q q,D i,Q d);
@@ -664,6 +670,20 @@ static inline Q atom_payload_for_hash(Q q){
   if(tq==3) return di_int(q);
   return di(q);
 }
+static inline D struct_child_count(B tq, B sq, Q q){
+  if(tq==0){
+    if(sq==2) return 2;   // dict: keys+vals (ignore ht)
+    if(sq==1) return n(q); // pointer list
+  }
+  if(tq==4 && sq==1) return n(q); // partial-eval chain is structural
+  if(tq==T_LAMBDA) return 2;       // (params;body)
+  return 0;
+}
+static inline Q struct_child_at(B tq, B sq, Q q, D i){
+  if(tq==0 && sq==2) return pi(q, i+1); // skip ht
+  (void)sq;
+  return pi(q, i);
+}
 static Q qhash_struct(Q q, Q* stack, D depth){
   if(!q) return 0;
   if(depth > 1024) return 0x243F6A8885A308D3ULL;
@@ -680,20 +700,10 @@ static Q qhash_struct(Q q, Q* stack, D depth){
     return mix64(h ^ mix64(atom_payload_for_hash(q)));
   }
 
-  // Structural dictionary: ignore internal hash table.
-  if(sq==2 && tq==0){
-    Q kq = pi(q, 1);
-    Q vq = pi(q, 2);
-    h = mix64(h ^ qhash_struct(kq, stack, depth+1));
-    h = mix64(h ^ qhash_struct(vq, stack, depth+1));
-    return h;
-  }
-
-  // Pointer lists and partial eval chains are structural.
-  if(tq==0 || tq==4){
-    D nq = n(q);
-    for(D i=0;i<nq;i++){
-      h = mix64(h ^ qhash_struct(pi(q,i), stack, depth+1));
+  D cn = struct_child_count(tq, sq, q);
+  if(cn){
+    for(D i=0;i<cn;i++){
+      h = mix64(h ^ qhash_struct(struct_child_at(tq, sq, q, i), stack, depth+1));
     }
     return h;
   }
@@ -723,6 +733,19 @@ static inline Q dict_ensure_ht(Q d, D want_keys){
 
   if(used != key_n || cap < need) return dict_rehash(d, need);
   return d;
+}
+
+static inline Q dict_norm(Q d, D want_keys, Q* htq_out, Q* kq_out, Q* vq_out, Q** ht_out, D* cap_out){
+  if(!ip(d) || 2!=sh(d)) return ae(1);
+  Q ok = dict_ensure_ht(d, want_keys);
+  if(is_err(ok)) return ok;
+  Q htq = pi(d,0), kq = pi(d,1), vq = pi(d,2);
+  if(htq_out) *htq_out = htq;
+  if(kq_out) *kq_out = kq;
+  if(vq_out) *vq_out = vq;
+  if(ht_out) *ht_out = (Q*)p(htq);
+  if(cap_out) *cap_out = cp(htq);
+  return 0;
 }
 
 static inline D fp32_from_hash(Q h){
@@ -769,10 +792,9 @@ B LSEP[1024];
 
 Q dki(Q d, Q k){                                                                // inner "dictionary key" lookup for a single dictionary
   if(!ip(d)||2!=sh(d)) return 0;                                                // Not a dictionary
-  Q ok = dict_ensure_ht(d, n(pi(d,1)));
+  Q htq=0,kq=0,vq=0; Q* ht=0; D c=0;
+  Q ok = dict_norm(d, n(pi(d,1)), &htq, &kq, &vq, &ht, &c);
   if(is_err(ok)) return ok;
-  Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
-  Q* ht=(Q*)p(htq); D c=cp(htq);
   Q h = qhash64(k);
   D i=fk_h(ht,k,h,c,kq);
   if(i==c){return 0;}                                                           // Not found
@@ -795,7 +817,7 @@ Q dk(Q d, Q k){                                                                 
   return ac(4);                                                                 // Return result from G or "not found"
 }
 
-static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth);
+static Q twc(B m, Q dest_ar, B dest_a, D dest_fid, Q q, Q* stack, D depth, B force);
 
 static inline B is_nf(Q q){ return 34==t(q) && dc(q)==4; }
 static inline B is_fatal_clone_control(Q q){
@@ -809,94 +831,14 @@ static inline B is_fatal_clone_control(Q q){
   return 1;                             // non-printable / out-of-band controls => fatal
 }
 
-static inline Q clone_lambda_for_embed(Q q, Q dest_ar, Q* stack, D depth);
-
 static inline Q clone0_for_embed0(Q q, Q dest_ar, Q* stack, D depth){
-  if(!ip(q)) return q;
-  B tq = t(q);
-  if(tq!=0 && tq!=T_LAMBDA) return q;
-  if(depth >= 64) return ae(99);
-  for(D i=0;i<depth;i++) if(stack[i]==q) return ae(2);                           // cycle detected
-  stack[depth]=q;
-  if(tq==T_LAMBDA) return clone_lambda_for_embed(q, dest_ar, stack, depth+1);
-  return clone0_for_embed(q, dest_ar, stack, depth+1);
-}
-
-static Q clone0_for_embed(Q q, Q dest_ar, Q* stack, D depth){
-  if(!ip(q) || t(q)!=0) return q;
-
-  B s = sh(q);
-  if(s==2){
-    Q kq=pi(q,1),vq=pi(q,2);
-
-    Q k2 = tsna(dest_ar, 0, 1, ls(kq), n(kq), cp(kq));
-    for(D i=0;i<n(kq);i++){
-      Q ki = pi(kq, i);
-      Q kc = clone0_for_embed0(ki, dest_ar, stack, depth);
-      if(is_fatal_clone_control(kc)) return kc;
-      zid(k2, i, kc);
-    }
-
-    Q v2 = tsna(dest_ar, t(vq), 1, ls(vq), n(vq), cp(vq));
-    if(0==t(vq)){
-      for(D i=0;i<n(vq);i++){
-        Q vi = pi(vq, i);
-        Q vc = clone0_for_embed0(vi, dest_ar, stack, depth);
-        if(is_fatal_clone_control(vc)) return vc;
-        zid(v2, i, vc);
-      }
-    }else{
-      memcpy(p(v2), p(vq), (size_t)sz(vq) * (size_t)n(vq));
-    }
-
-    Q d2 = tsna(dest_ar, 0, 2, 3, 3, 3);
-    zid(d2, 1, k2);
-    zid(d2, 2, v2);
-    Q r = dict_rehash(d2, dict_hash_cap_for_keys(n(k2)));
-    if(is_err(r)) return r;
-    return d2;
-  }
-
-  if(s==1 || s==0){
-    Q* h = ptr(q);
-    B z = (B)h[2];
-    D nq = (D)h[4], cq = (D)h[5];
-    Q r = tsna(dest_ar, 0, s, z, nq, cq);
-    for(D i=0;i<nq;i++){
-      Q ei = pi(q, i);
-      Q ec = clone0_for_embed0(ei, dest_ar, stack, depth);
-      if(is_fatal_clone_control(ec)) return ec;
-      zid(r, i, ec);
-    }
-    return r;
-  }
-
-  return ae(1);                                                                   // unsupported shape
-}
-
-static inline Q clone_lambda_for_embed(Q q, Q dest_ar, Q* stack, D depth){
-  if(!ip(q) || t(q)!=T_LAMBDA || sh(q)!=1 || n(q)!=2) return ae(1);
-  Q params = pi(q, 0);
-  Q body = pi(q, 1);
-
-  Q params2 = clone0_for_embed0(params, dest_ar, stack, depth);
-  if(is_fatal_clone_control(params2)) return params2;
-  Q body2 = clone0_for_embed0(body, dest_ar, stack, depth);
-  if(is_fatal_clone_control(body2)) return body2;
-
-  Q r = tsna(dest_ar, T_LAMBDA, 1, 3, 2, 2);
-  zid(r, 0, params2);
-  zid(r, 1, body2);
-  return r;
+  return twc(1, dest_ar, AR_ID(dest_ar), AR_FID(dest_ar), q, stack, depth, 0);
 }
 
 Q dkv(Q d,Q k,Q v){
-  Q htq=pi(d,0),kq=pi(d,1),vq=pi(d,2);
-  Q ok = dict_ensure_ht(d, n(kq) + 1);
+  Q htq=0,kq=0,vq=0; Q* ht=0; D c=0;
+  Q ok = dict_norm(d, n(pi(d,1)) + 1, &htq, &kq, &vq, &ht, &c);
   if(is_err(ok)) return ok;
-  htq=pi(d,0);kq=pi(d,1);vq=pi(d,2);
-  Q* ht=(Q*)p(htq);
-  D c=cp(htq);
   Q h = qhash64(k);
   D i=fk_h(ht,k,h,c,kq);
   if(i==c){return ae(6);}
@@ -980,84 +922,112 @@ static inline Q strip_fid(Q q){
     return q;
 }
 
-static inline Q atom_payload(Q q){
-    return ip(q) ? pi(q, 0) : di(q);
-}
-
 static inline Q heap_atom_from(Q dest_ar, Q q){
     B tq = t(q);
     B z = ip(q) ? ls(q) : (tq == 6 ? 0 : 3);
     Q res = tsna(dest_ar, tq, 0, z, 1, 1);
-    pid(res, 0, atom_payload(q));
+    pid(res, 0, ip(q) ? pi(q, 0) : di(q));
     return res;
 }
 
-Q q2a_dict(Q dest_ar, Q q) {
-    // A dictionary is a list of 3 pointers: hash, keys, values
-    Q res = tsna(dest_ar, 0, 2, 3, 3, 3);
+Q q2a(Q dest_ar, Q q){
+  return twc(0, dest_ar, AR_ID(dest_ar), AR_FID(dest_ar), q, 0, 0, 1);
+}
 
-    Q k = q2a(dest_ar, pi(q, 1));
-    Q v = q2a(dest_ar, pi(q, 2));
-    if (AR_ID(dest_ar) == 2) { k = strip_fid(k); v = strip_fid(v); }
-    zid(res, 1, k); // keys
-    zid(res, 2, v); // values
-    Q r = dict_rehash(res, dict_hash_cap_for_keys(n(k)));
+enum { TW_Q2A=0, TW_EMB=1 };
+
+static inline Q twc_store(B m, B dest_a, Q q){
+  if(m==TW_Q2A && dest_a==2) return strip_fid(q);
+  return q;
+}
+
+static inline Q twc_imm(Q dest_ar, B m, B dest_a, Q q){
+  if(m!=TW_Q2A || dest_a!=2) return q;
+  // Keep control/errors as immediates even when materializing into file arena.
+  // (They are sentinel values; persisting them as heap atoms just adds ambiguity.)
+  B tq = t(q);
+  if(tq==T_CTL || tq==T_ERR) return q;
+  return heap_atom_from(dest_ar, q);
+}
+
+static Q twc(B m, Q dest_ar, B dest_a, D dest_fid, Q q, Q* stack, D depth, B force){
+  if(!q) return 0;
+  if(!ip(q)) return twc_imm(dest_ar, m, dest_a, q);
+
+  if(m==TW_Q2A && ha(q)==dest_a){
+    if(dest_a!=2 || (D)(q>>44)==dest_fid) return q;
+  }
+
+  B tq = t(q);
+  B sq = sh(q);
+
+  if(m==TW_EMB && !force && tq!=0 && tq!=T_LAMBDA) return q;
+
+  if(m==TW_EMB && (tq==0 || tq==T_LAMBDA)){
+    if(depth >= 64) return ae(99);
+    for(D i=0;i<depth;i++) if(stack[i]==q) return ae(2);                         // cycle detected
+    stack[depth]=q;
+    depth++;
+  }
+
+  if(tq==T_LAMBDA){
+    if(!ip(q) || sq!=1 || n(q)!=2) return ae(1);
+    Q params = pi(q, 0);
+    Q body = pi(q, 1);
+    Q params2 = twc(m, dest_ar, dest_a, dest_fid, params, stack, depth, 0);
+    if(m==TW_EMB && is_fatal_clone_control(params2)) return params2;
+    Q body2 = twc(m, dest_ar, dest_a, dest_fid, body, stack, depth, 0);
+    if(m==TW_EMB && is_fatal_clone_control(body2)) return body2;
+    Q r = tsna(dest_ar, T_LAMBDA, 1, 3, 2, 2);
+    zid(r, 0, twc_store(m, dest_a, params2));
+    zid(r, 1, twc_store(m, dest_a, body2));
+    return r;
+  }
+
+  if(sq==2 && tq==0){
+    Q kq = pi(q, 1);
+    Q vq = pi(q, 2);
+    Q k2 = twc(m, dest_ar, dest_a, dest_fid, kq, stack, depth, 0);
+    if(is_err(k2)) return k2;
+    Q v2;
+    if(m==TW_EMB && ip(vq) && t(vq)!=0) v2 = twc(m, dest_ar, dest_a, dest_fid, vq, stack, depth, 1);
+    else v2 = twc(m, dest_ar, dest_a, dest_fid, vq, stack, depth, 0);
+    if(is_err(v2)) return v2;
+    Q d2 = tsna(dest_ar, 0, 2, 3, 3, 3);
+    zid(d2, 1, twc_store(m, dest_a, k2));
+    zid(d2, 2, twc_store(m, dest_a, v2));
+    Q r = dict_rehash(d2, dict_hash_cap_for_keys(n(k2)));
     if(is_err(r)) return r;
-    return res;
-}
+    return d2;
+  }
 
-Q q2a_list(Q dest_ar, Q q){
+  if(tq==0 && (sq==1 || sq==0)){
     Q* h = ptr(q);
-    B t_q = h[0], s_q = h[1], l_q = h[2];
-    D n_q = h[4], c_q = h[5];
-    Q res = tsna(dest_ar, t_q, s_q, l_q, n_q, c_q);
-
-    if (t_q == 0) { // List of pointers
-        for (D i = 0; i < n_q; i++) {
-            // Recursively materialize each element
-            Q e = q2a(dest_ar, pi(q, i));
-            if (AR_ID(dest_ar) == 2) e = strip_fid(e);
-            zid(res, i, e);
-        }
-    } else { // List of values
-        memcpy(p(res), p(q), (1ULL << l_q) * n_q);
+    B z = (B)h[2];
+    D nq = (D)h[4], cq = (D)h[5];
+    Q r = tsna(dest_ar, 0, sq, z, nq, cq);
+    for(D i=0;i<nq;i++){
+      Q ei = pi(q, i);
+      Q ec = twc(m, dest_ar, dest_a, dest_fid, ei, stack, depth, 0);
+      if(m==TW_EMB && is_fatal_clone_control(ec)) return ec;
+      if(is_err(ec)) return ec;
+      zid(r, i, twc_store(m, dest_a, ec));
     }
-    return res;
-}
+    return r;
+  }
 
-Q q2a(Q dest_ar, Q q) {
-    B dest_a = AR_ID(dest_ar);
-    D dest_fid = AR_FID(dest_ar);
+  if((m==TW_Q2A || force) && sq==0) return heap_atom_from(dest_ar, q);
 
-    if (!ip(q)) {
-        if(dest_a == 2){
-          // Keep control/errors as immediates even when materializing into file arena.
-          // (They are sentinel values; persisting them as heap atoms just adds ambiguity.)
-          B tq = t(q);
-          if(tq==T_CTL || tq==T_ERR) return q;
-          return heap_atom_from(dest_ar, q);
-        }
-        return q;
-    }
+  if((m==TW_Q2A || force) && sq==1){
+    Q* h = ptr(q);
+    B lq = (B)h[2];
+    D nq = (D)h[4], cq = (D)h[5];
+    Q r = tsna(dest_ar, tq, 1, lq, nq, cq);
+    memcpy(p(r), p(q), (1ULL<<lq) * (Q)nq);
+    return r;
+  }
 
-    if (ha(q) == dest_a) {
-        if (dest_a != 2 || (q >> 44) == dest_fid) return q;
-    }
-
-    if(t(q)==T_LAMBDA){
-        Q params = q2a(dest_ar, pi(q, 0));
-        Q body = q2a(dest_ar, pi(q, 1));
-        if (AR_ID(dest_ar) == 2) { params = strip_fid(params); body = strip_fid(body); }
-        Q res = tsna(dest_ar, T_LAMBDA, 1, 3, 2, 2);
-        zid(res, 0, params);
-        zid(res, 1, body);
-        return res;
-    }
-
-    if (sh(q) == 0) return heap_atom_from(dest_ar, q);
-    if (sh(q) == 1) return q2a_list(dest_ar, q);
-    if (sh(q) == 2) return q2a_dict(dest_ar, q);
-    return q;
+  return q;
 }
 
 // -----------------------------------------------------------------------------
@@ -1110,12 +1080,9 @@ static inline Q tag64_parse_payload(const C* s, D len){
 static B symmap_lookup_id(Q symmap, const C* bytes, D len, D* out_id){
   if(!out_id) return 0;
   if(!symmap || !ip(symmap) || sh(symmap)!=2) return 0;
-  Q ok = dict_ensure_ht(symmap, n(pi(symmap,1)));
-  if(is_err(ok)) return 0;
-
-  Q htq=pi(symmap,0), kq=pi(symmap,1), vq=pi(symmap,2);
-  Q* ht=(Q*)p(htq);
-  D c=cp(htq);
+  Q htq=0,kq=0,vq=0; Q* ht=0; D c=0;
+  Q ok = dict_norm(symmap, n(pi(symmap,1)), &htq, &kq, &vq, &ht, &c);
+  if(ok) return 0;
   if(!c) return 0;
   D mask = c - 1;
 
@@ -1351,10 +1318,10 @@ void os_unmap_ro(void* addr, Q sz, Q h){
 }
 
 void os_unmap(D fid){
-  Q* addrs = (Q*)p(FT_addr);
-  Q* caps  = (Q*)p(FT_cap);
-  Q* hs    = (Q*)p(FT_h);
-  Q* szs   = (Q*)p(FT_sz);
+  Q* addrs = ft_addrp();
+  Q* caps  = ft_capp();
+  Q* hs    = ft_hp();
+  Q* szs   = ft_szp();
 
   if(!addrs[fid]) return;
 
@@ -1462,10 +1429,10 @@ void os_unmap_ro(void* addr, Q sz, Q h){
 }
 
 void os_unmap(D fid){
-  Q* addrs = (Q*)p(FT_addr);
-  Q* caps  = (Q*)p(FT_cap);
-  Q* hs    = (Q*)p(FT_h);
-  Q* szs   = (Q*)p(FT_sz);
+  Q* addrs = ft_addrp();
+  Q* caps  = ft_capp();
+  Q* hs    = ft_hp();
+  Q* szs   = ft_szp();
 
   if(!addrs[fid]) return;
 
@@ -1571,8 +1538,9 @@ Q file_read_log(Q f);
 
 Q fl(B A, Q v, Q a, Q w){
   if(t(w)!=6) return ae(2);
-  char fn[256]; D fn_len = n(w); if(fn_len > 255) fn_len = 255;
-  for(D i=0; i<fn_len; i++) fn[i] = (char)pi(w,i); fn[fn_len] = 0;
+  char fn[256];
+  if(!qstr_to_c(w, fn, (D)sizeof(fn))) return ae(2);
+  D fn_len = (D)strlen(fn);
 
   D idx = n(FT_addr);
   D target_idx = -1;
@@ -1604,10 +1572,10 @@ Q fl(B A, Q v, Q a, Q w){
 
   Q fn_q = vca(1, 6, 0, fn_len);
   memcpy(p(fn_q), fn, fn_len);
-  ((Q*)p(FT_addr))[target_idx] = (Q)map_base;
-  ((Q*)p(FT_sz))[target_idx]   = used;
-  ((Q*)p(FT_cap))[target_idx]  = sz;
-  ((Q*)p(FT_h))[target_idx]    = h;
+  ft_addrp()[target_idx] = (Q)map_base;
+  ft_szp()[target_idx]   = used;
+  ft_capp()[target_idx]  = sz;
+  ft_hp()[target_idx]    = h;
   zid(FT_fn, target_idx, fn_q);
 
   return aA(2, target_idx);
@@ -1615,8 +1583,9 @@ Q fl(B A, Q v, Q a, Q w){
 
 Q sv(B A, Q v, Q a, Q w){
   if(t(a)!=6) return ae(2);
-  char fn[256]; D fn_len = n(a); if(fn_len > 255) fn_len = 255;
-  for(D i=0; i<fn_len; i++) fn[i] = (char)pi(a,i); fn[fn_len] = 0;
+  char fn[256];
+  if(!qstr_to_c(a, fn, (D)sizeof(fn))) return ae(2);
+  D fn_len = (D)strlen(fn);
 
   remove(fn); // Overwrite by removing first.
 
@@ -1627,10 +1596,10 @@ Q sv(B A, Q v, Q a, Q w){
   if(!map_base) return ae(2);
 
   // Temporarily populate FT to use materialize
-  ((Q*)p(FT_addr))[fid] = (Q)map_base;
-  ((Q*)p(FT_sz))[fid]   = 16;
-  ((Q*)p(FT_cap))[fid]  = sz;
-  ((Q*)p(FT_h))[fid]    = h;
+  ft_addrp()[fid] = (Q)map_base;
+  ft_szp()[fid]   = 16;
+  ft_capp()[fid]  = sz;
+  ft_hp()[fid]    = h;
 
   Q f_handle = aA(2, fid);
   Q root_ptr = q2a(di(f_handle), w);
@@ -1704,7 +1673,7 @@ Q textd(B A, Q v, Q a, Q w){
 
 Q file_read(Q f){
   D fid = AR_FID(di(f));
-  Q root = *(Q*)((Q*)p(FT_addr))[fid];
+  Q root = *(Q*)ft_addrp()[fid];
   if(ip(root) && ha(root)==2){
     root |= ((Q)fid << 44); // Inject file index into root pointer
   }
@@ -1723,7 +1692,7 @@ Q ld(B A, Q v, Q a, Q w){
 }
 Q file_append(Q a, Q w){
   D fid = AR_FID(di(a));
-  Q* addrs = (Q*)p(FT_addr);
+  Q* addrs = ft_addrp();
 
   // 1. Read the old root object's pointer.
   Q old_root_ptr = file_read(a);
@@ -1753,8 +1722,8 @@ Q file_log(Q a, Q w){
 
 Q file_read_log(Q f){
   D fid = AR_FID(di(f));
-  Q* addrs = (Q*)p(FT_addr);
-  Q* szs = (Q*)p(FT_sz);
+  Q* addrs = ft_addrp();
+  Q* szs = ft_szp();
   Q* base_addr = (Q*)addrs[fid];
   Q used_size = szs[fid];
 
@@ -1794,7 +1763,7 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 39
+#define VTZ 40
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -1949,23 +1918,25 @@ static inline void out_pr_f64(L_Out* out, double x){
 }
 
 static inline void out_pr_adv_ascii(L_Out* out, D ai){
-  switch(ai){
-    case 0: return;
-    case 1: out_putc(out, '\''); return;
-    case 2: out_puts(out, "->"); return;
-    case 3: out_puts(out, "<-"); return;
-    case 4: out_puts(out, "<'"); return;
-    case 5: out_puts(out, "'>"); return;
-    case 6: out_puts(out, "'v"); return;
-    case 7: out_puts(out, "'^"); return;
-    case 8: out_puts(out, "<o"); return;
-    case 9: out_puts(out, "o>"); return;
-    case 10: out_puts(out, "/'"); return;
-    case 11: out_puts(out, "\\'"); return;
-    case 12: out_puts(out, "<p"); return;
-    case 13: out_puts(out, "p>"); return;
-    default: out_puts(out, (ai < (D)ATZ) ? AT[ai] : "?"); return;
-  }
+  static const char* AT_ASCII[ATZ] = {
+    0,
+    "'",   // 1
+    "->",  // 2
+    "<-",  // 3
+    "<'",  // 4
+    "'>",  // 5
+    "'v",  // 6
+    "'^",  // 7
+    "<o",  // 8
+    "o>",  // 9
+    "/'",  // 10
+    "\\'", // 11
+    "<p",  // 12
+    "p>",  // 13
+  };
+  if(ai<=0) return;
+  if(ai < (D)ATZ && AT_ASCII[ai]){ out_puts(out, AT_ASCII[ai]); return; }
+  out_puts(out, (ai < (D)ATZ) ? AT[ai] : "?");
 }
 
 static inline void out_pr_control_ascii(L_Out* out, Q q){
@@ -2294,6 +2265,19 @@ Q reprm(B A, Q v, Q a, Q w){
   if(b.err){ dr(b.q); return b.err; }
   return b.q;
 }
+
+Q prm(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  StdoutBuf sb;
+  sb.len = 0;
+  L_Out out;
+  out.ctx = &sb;
+  out.write = out_write_stdout;
+  out_print_q(&out, w);
+  out_putc(&out, '\n');
+  stdoutbuf_flush(&sb);
+  return mis();
+}
 VF VD[VTZ];
 VF VM[VTZ];
 extern VF AV[ATZ];
@@ -2332,15 +2316,28 @@ Q dispatch(VF* Vtab, const BM* Btab, Q v, Q a, Q w);
 
 static inline Q vb_rebuild_dict(B A, Q d, Q new_vals){
   Q zd=dnu(0,3,0,A);
-  Q kq = pi(d,1);
-  Q *hk=ptr(kq);
-  Q kc=tsna(A,hk[0],hk[1],hk[2],hk[4],hk[5]);
-  memcpy(p(kc), p(kq), (size_t)sz(kq) * (size_t)n(kq));
-  for(D i=0;i<n(kc);i++) ir(pi(kc,i)); // preserve referenced key objects if any
 
-  zid(zd,1,kc);
-  zid(zd,2,new_vals);
-  Q r = dict_rehash(zd, dict_hash_cap_for_keys(n(kc)));
+  Q ht0 = pi(d, 0);
+  Q k0  = pi(d, 1);
+  D nk  = n(k0);
+
+  Q k2=tsna(A, 0, 1, 3, nk, cp(k0));
+  memcpy(p(k2), p(k0), (size_t)nk * sizeof(Q));
+  for(D i=0;i<nk;i++) ir(pi(k2, i)); // preserve referenced key objects if any
+
+  zid(zd, 1, k2);
+  zid(zd, 2, new_vals);
+
+  // Fast path: clone ht without rehashing. Safe because ht stores only fp32|idx32 entries (no pointers).
+  if(ip(ht0) && t(ht0)==5 && sh(ht0)==1 && n(ht0)==nk){
+    D hc = cp(ht0);
+    Q ht2 = tsna(A, 5, 1, 3, nk, hc);
+    memcpy(p(ht2), p(ht0), (size_t)hc * sizeof(Q));
+    zid(zd, 0, ht2);
+    return zd;
+  }
+
+  Q r = dict_rehash(zd, dict_hash_cap_for_keys(nk));
   if(is_err(r)) return r;
   return zd;
 }
@@ -3054,59 +3051,112 @@ Q tl(B A,Q v,Q a,Q w){
   return z;
 }
 
-Q at(B A,Q v,Q a,Q w){
-  // Dictionary lookup: d@k
-  if(ip(a) && t(a)==0 && sh(a)==2){
-    if(ii(w)){
-      Q r = dki(a, w);
-      if(is_err(r)) return r;
-      return r ? r : ac(4);
-    }
-    if(sh(w)==1){
-      D nw=n(w);
-      Q z = ln(nw);
-      for(D i=0;i<nw;i++){
-        Q ki = qi(w, i);
-        Q r = dki(a, ki);
-        if(is_err(r)) return r;
-        zid(z, i, r ? r : ac(4));
-      }
-      return z;
-    }
-    return ae(1);
-  }
+static inline B is_dict(Q q){ return ip(q) && t(q)==0 && sh(q)==2; }
+static inline B is_ptr_list(Q q){ return ip(q) && t(q)==0 && sh(q)==1; }
+static inline B is_val_vec(Q q){ return ip(q) && sh(q)==1 && t(q)!=0 && t(q)!=4; }
+static inline B is_lambda_introspect(Q q){ return ip(q) && t(q)==T_LAMBDA && sh(q)==1 && n(q)==2; }
 
-  // Lambda introspection: lam@0 => params, lam@1 => body
-  if(ip(a) && t(a)==T_LAMBDA && sh(a)==1 && n(a)==2){
-    if(ii(w)){
-      if(t(w)!=T_INT) return ae(2);
-      J idx = (J)ra(w);
-      if(idx<0 || idx>1) return ae(2);
-      return pi(a, (D)idx);
-    }
-    if(sh(w)==1){
-      D nw=n(w);
-      Q z = ln(nw);
-      for(D i=0;i<nw;i++){
-        Q wi = qi(w, i);
-        if(t(wi)!=T_INT) return ae(2);
-        J idx = (J)ra(wi);
-        if(idx<0 || idx>1) return ae(2);
-        zid(z, i, pi(a, (D)idx));
-      }
-      return z;
-    }
-    return ae(1);
-  }
+static inline Q idx_d_scalar(Q idx, D* out){
+  if(t(idx)!=T_INT || sh(idx)!=0) return ae(2);
+  J ij = (J)ra(idx);
+  if(ij < 0) return ae(2);
+  *out = (D)ij;
+  return 0;
+}
 
-  B aa=ii(a),aw=ii(w);B nz=n(w);
-  if(aw){return aa?a:qi(a,ra(w));} // TODO: arena awareness
-  Q z=vna(0,t(a),ls(a),nz);
-  for(D i=0;i<nz;i++){ // unmerge this. use shape of w to dispatch. 
-    Q zi=ri(a,aw?ra(w):ri(w,i));
-    qid(z,i,zi);
+static inline B val_vec_type_ok(B tc){
+  return (tc==T_INT) || (tc==T_FLT) || (tc==T_CHAR) || (tc==T_SYM) || (tc==T_TAG);
+}
+static inline Q val_bits_for_store(Q val, B tc, Q* bits_out){
+  if(t(val)!=tc || sh(val)!=0) return ae(2);
+  Q bits = ra(val);
+  if(is_err(bits)) return bits;
+  *bits_out = bits;
+  return 0;
+}
+
+static inline Q dict_get1(Q d, Q k){
+  Q r = dki(d, k);
+  if(is_err(r)) return r;
+  return r ? r : ac(4);
+}
+
+static inline Q lambda_get1(Q lam, Q idx){
+  D i = 0;
+  Q err = idx_d_scalar(idx, &i);
+  if(is_err(err)) return err;
+  if(i>1) return ae(2);
+  return pi(lam, i);
+}
+
+static inline Q seq_get1(Q a, Q idx){
+  if(ii(a)) return a;
+  if(!ip(a) || sh(a)!=1) return ae(1);
+  D i = 0;
+  Q err = idx_d_scalar(idx, &i);
+  if(is_err(err)) return err;
+  return qi(a, i);
+}
+
+static inline Q container_get1(Q a, Q idx){
+  if(is_dict(a)) return dict_get1(a, idx);
+  if(is_lambda_introspect(a)) return lambda_get1(a, idx);
+  return seq_get1(a, idx);
+}
+
+static inline Q dict_get_many(Q d, Q ks){
+  if(sh(ks)!=1) return ae(1);
+  D nk = n(ks);
+  Q z = ln(nk);
+  for(D i=0;i<nk;i++){
+    Q key = qi(ks, i);
+    Q r = dict_get1(d, key);
+    if(is_err(r)) return r;
+    zid(z, i, r);
   }
   return z;
+}
+
+static inline Q lambda_get_many(Q lam, Q idxs){
+  if(sh(idxs)!=1) return ae(1);
+  D nw = n(idxs);
+  Q z = ln(nw);
+  for(D i=0;i<nw;i++){
+    Q wi = qi(idxs, i);
+    D idx = 0;
+    Q err = idx_d_scalar(wi, &idx);
+    if(is_err(err)) return err;
+    if(idx>1) return ae(2);
+    zid(z, i, pi(lam, idx));
+  }
+  return z;
+}
+
+static inline Q seq_get_many(Q a, Q idxs){
+  if(!ip(a) || sh(a)!=1) return ae(1);
+  if(!ip(idxs) || t(idxs)!=T_INT || sh(idxs)!=1) return ae(2);
+  D nw = n(idxs);
+  Q z = vna(0, t(a), ls(a), nw);
+  for(D i=0;i<nw;i++){
+    Q idx = ri(idxs, i);
+    Q zi = ri(a, (D)idx);
+    qid(z, i, zi);
+  }
+  return z;
+}
+
+static inline Q container_get_many(Q a, Q idxs){
+  if(is_dict(a)) return dict_get_many(a, idxs);
+  if(is_lambda_introspect(a)) return lambda_get_many(a, idxs);
+  return seq_get_many(a, idxs);
+}
+
+Q at(B A,Q v,Q a,Q w){
+  (void)A; (void)v;
+  B sw = sh(w);
+  if(sw==0) return container_get1(a, w);
+  if(sw==1) return container_get_many(a, w);
+  return ae(1);
 }
 
 Q pl(B A,Q v,Q a,Q w){ (void)A; (void)v; return num_binop(NOP_ADD, a, w); }
@@ -3150,20 +3200,10 @@ static B match_struct(Q a, Q w, D depth){
   D na=n(a), nw=n(w);
   if(na!=nw) return 0;
 
-  // Dictionaries are structural: ignore internal hash table contents.
-  if(sa==2 && ta==0){
-    return match_struct(pi(a,1), pi(w,1), depth+1) && match_struct(pi(a,2), pi(w,2), depth+1);
-  }
-
-  // Lambdas are structural: compare fields.
-  if(ta==T_LAMBDA){
-    return match_struct(pi(a,0), pi(w,0), depth+1) && match_struct(pi(a,1), pi(w,1), depth+1);
-  }
-
-  // Pointer lists (and partial-eval sequences) compare recursively.
-  if(ta==0 || ta==4){
-    for(D i=0;i<na;i++){
-      if(!match_struct(pi(a,i), pi(w,i), depth+1)) return 0;
+  D cn = struct_child_count(ta, sa, a);
+  if(cn){
+    for(D i=0;i<cn;i++){
+      if(!match_struct(struct_child_at(ta, sa, a, i), struct_child_at(tw, sw, w, i), depth+1)) return 0;
     }
     return 1;
   }
@@ -3204,10 +3244,6 @@ Q ng(B A,Q v,Q a,Q w){
   return z;
 }
 
-static inline B is_dict(Q q){ return ip(q) && t(q)==0 && sh(q)==2; }
-static inline B is_ptr_list(Q q){ return ip(q) && t(q)==0 && sh(q)==1; }
-static inline B is_val_vec(Q q){ return ip(q) && sh(q)==1 && t(q)!=0 && t(q)!=4; }
-
 static inline Q set_embed_kv(Q dest_dict, Q key, Q w, D sp){
   if(ip(w) && 0==t(w)){
     // Preserve identity for open-scope/list builders so later input continues mutating the same object.
@@ -3236,10 +3272,9 @@ static Q container_set_scalar(Q container, Q idx, Q val){
   }
 
   if(is_ptr_list(container)){
-    if(t(idx)!=T_INT || sh(idx)!=0) return ae(2);
-    J ij = (J)ra(idx);
-    if(ij < 0) return ae(2);
-    D i = (D)ij;
+    D i = 0;
+    Q err = idx_d_scalar(idx, &i);
+    if(is_err(err)) return err;
     if(i >= n(container)) return ae(2);
     Q old = pi(container, i);
     ir(val);
@@ -3249,40 +3284,18 @@ static Q container_set_scalar(Q container, Q idx, Q val){
   }
 
   if(is_val_vec(container)){
-    if(t(idx)!=T_INT || sh(idx)!=0) return ae(2);
-    J ij = (J)ra(idx);
-    if(ij < 0) return ae(2);
-    D i = (D)ij;
+    D i = 0;
+    Q err = idx_d_scalar(idx, &i);
+    if(is_err(err)) return err;
     if(i >= n(container)) return ae(2);
 
     B tc = t(container);
-    if(tc==T_INT){
-      if(t(val)!=T_INT || sh(val)!=0) return ae(2);
-      pid(container, i, ra(val));
-      return container;
-    }
-    if(tc==T_FLT){
-      if(t(val)!=T_FLT || sh(val)!=0) return ae(2);
-      pid(container, i, ra(val));
-      return container;
-    }
-    if(tc==T_CHAR){
-      if(t(val)!=T_CHAR || sh(val)!=0) return ae(2);
-      pid(container, i, ra(val));
-      return container;
-    }
-    if(tc==T_SYM){
-      if(t(val)!=T_SYM || sh(val)!=0) return ae(2);
-      pid(container, i, ra(val));
-      return container;
-    }
-    if(tc==T_TAG){
-      if(t(val)!=T_TAG || sh(val)!=0) return ae(2);
-      pid(container, i, ra(val));
-      return container;
-    }
-
-    return ae(2);
+    if(!val_vec_type_ok(tc)) return ae(2);
+    Q bits = 0;
+    err = val_bits_for_store(val, tc, &bits);
+    if(is_err(err)) return err;
+    pid(container, i, bits);
+    return container;
   }
 
   return ae(2);
@@ -3297,7 +3310,7 @@ static Q container_set_in(Q container, Q idxs, D pos, D nidx, Q val){
   }
 
   // Descend one level (create intermediate dicts on demand for dict containers).
-  Q child = at(0, av(3), container, idx);
+  Q child = container_get1(container, idx);
   if(is_err(child)) return child;
   if(is_nf(child)){
     if(is_dict(container)){
@@ -3320,11 +3333,60 @@ static Q container_set_in(Q container, Q idxs, D pos, D nidx, Q val){
 
 static inline Q container_set_path(Q container, Q idxs, Q val){
   if(!idxs) return ae(2);
-  if(ii(idxs)) return container_set_scalar(container, idxs, val);
+  if(sh(idxs)==0) return container_set_scalar(container, idxs, val);
   if(!is_ptr_list(idxs)) return ae(2);
   D nidx = n(idxs);
   if(nidx==0) return val; // x[]:v => replace x with v
   return container_set_in(container, idxs, 0, nidx, val);
+}
+
+static inline Q env_ensure_ref_parent(Q env, Q ref, Q* parent_out, Q* key_out){
+  if(!is_dict(env) || !ref || t(ref)!=1) return ae(2);
+
+  if(sh(ref)==0){
+    *parent_out = env;
+    *key_out = as(ra(ref));
+    return 0;
+  }
+
+  if(sh(ref)!=1) return ae(1);
+  D segc = n(ref);
+  if(segc <= 0) return ae(2);
+
+  Q base_key = as(pi(ref, 0));
+  if(segc == 1){
+    *parent_out = env;
+    *key_out = base_key;
+    return 0;
+  }
+
+  Q cur = dki(env, base_key);
+  if(is_err(cur)) return cur;
+  if(!cur){
+    Q nd = dni(0, 3, 0, obj_ar(env));
+    Q r = dkv(env, base_key, nd);
+    if(is_err(r)) return r;
+    cur = nd;
+  }
+  if(!is_dict(cur)) return ae(2);
+
+  for(D i=1;i<segc-1;i++){
+    Q k = as(pi(ref, i));
+    Q next = dki(cur, k);
+    if(is_err(next)) return next;
+    if(!next){
+      Q nd = dni(0, 3, 0, obj_ar(cur));
+      Q r = dkv(cur, k, nd);
+      if(is_err(r)) return r;
+      next = nd;
+    }
+    if(!is_dict(next)) return ae(2);
+    cur = next;
+  }
+
+  *parent_out = cur;
+  *key_out = as(pi(ref, segc-1));
+  return 0;
 }
 
 Q set(Q a,Q w,D sp){
@@ -3335,50 +3397,9 @@ Q set(Q a,Q w,D sp){
     Q ref = pi(a, 0);
     Q idxs = pi(a, 1);
     if(ref && t(ref)==1){
-
-      // Resolve the parent dictionary + final key to update (creating dotref intermediate dicts if needed).
-      Q parent = d;
-      Q key = 0;
-
-      if(sh(ref)==0){
-        key = as(ra(ref));
-      }else if(sh(ref)==1){
-        D segc = n(ref);
-        if(segc <= 0) return ae(2);
-
-        Q base_key = as(pi(ref, 0));
-        if(segc == 1){
-          key = base_key;
-        }else{
-          Q cur = dki(d, base_key);
-          if(is_err(cur)) return cur;
-          if(!cur){
-            Q nd = dni(0, 3, 0, obj_ar(d));
-            dkv(d, base_key, nd);
-            cur = nd;
-          }
-          if(!is_dict(cur)) return ae(2);
-
-          for(D i=1;i<segc-1;i++){
-            Q k = as(pi(ref, i));
-            Q next = dki(cur, k);
-            if(is_err(next)) return next;
-            if(!next){
-              Q nd = dni(0, 3, 0, obj_ar(cur));
-              dkv(cur, k, nd);
-              next = nd;
-            }
-            if(!is_dict(next)) return ae(2);
-            cur = next;
-          }
-
-          parent = cur;
-          key = as(pi(ref, segc-1));
-        }
-      }else{
-        return ae(1);
-      }
-
+      Q parent = 0, key = 0;
+      Q err = env_ensure_ref_parent(d, ref, &parent, &key);
+      if(is_err(err)) return err;
       Q base = dki(parent, key);
       if(is_err(base)) return base;
       if(!base) return ae(2);
@@ -3393,40 +3414,10 @@ Q set(Q a,Q w,D sp){
 
   // Dotted reference assignment: a.b.c : w
   if(a && t(a)==1 && sh(a)==1){
-    D segc = n(a);
-    if(segc <= 0) return ae(2);
-
-    Q base_key = as(pi(a, 0));
-    if(segc == 1){
-      return set_embed_kv(d, base_key, w, sp);
-    }
-
-    // Ensure base container exists in the current scope dict.
-    Q cur = dki(d, base_key);
-    if(is_err(cur)) return cur;
-    if(!cur){
-      Q nd = dni(0, 3, 0, obj_ar(d));
-      dkv(d, base_key, nd);
-      cur = nd;
-    }
-    if(!(ip(cur) && t(cur)==0 && sh(cur)==2)) return ae(2);
-
-    // Create intermediate dicts as needed.
-    for(D i=1;i<segc-1;i++){
-      Q k = as(pi(a, i));
-      Q next = dki(cur, k);
-      if(is_err(next)) return next;
-      if(!next){
-        Q nd = dni(0, 3, 0, obj_ar(cur));
-        dkv(cur, k, nd);
-        next = nd;
-      }
-      if(!(ip(next) && t(next)==0 && sh(next)==2)) return ae(2);
-      cur = next;
-    }
-
-    Q last_key = as(pi(a, segc-1));
-    return set_embed_kv(cur, last_key, w, sp);
+    Q parent = 0, key = 0;
+    Q err = env_ensure_ref_parent(d, a, &parent, &key);
+    if(is_err(err)) return err;
+    return set_embed_kv(parent, key, w, sp);
   }
 
   // Store bindings under symbol keys (not reference keys).
@@ -3468,25 +3459,38 @@ Q sc(B A,Q v,Q a,Q w){
   for(;i<nw;i++){acc=dispatch(VD, VBD, v, acc, qi(w,i));zid(z,j++,acc);}
   return z;
 }
-Q lfa(B A,Q v,Q a,Q w){
-  if(ii(w))return a?dispatch(VD, VBD, v, a, w):dispatch(VM, VBM, v, 0, w);
-  D nw=n(w);Q z=ln(nw);
+static inline Q tw_apply(B A, Q v, Q a, Q w, B dyad){
+  return dyad ? dispatch(VD, VBD, v, a, w) : dispatch(VM, VBM, v, 0, w);
+}
+
+static Q tw_map(B A, Q v, Q a, Q w, D depth, B dyad){
+  if(!w) return 0;
+  B sw = sh(w);
+  if(sw==0 || sw!=1 || depth==0) return tw_apply(A, v, a, w, dyad);
+  D nw = n(w);
+  Q z = ln(nw);
+  D next_depth = (depth < 0) ? -1 : (depth - 1);
   for(D i=0;i<nw;i++){
-    Q wi=qi(w,i);
-    Q r=lfa(A,v,a,wi);
-    zid(z,i,r);
+    Q r = tw_map(A, v, a, qi(w, i), next_depth, dyad);
+    if(is_err(r)) return r;
+    zid(z, i, r);
   }
   return z;
 }
-Q lvs(B A,Q v,Q a,Q w){
-  if(a)return ae(2);
+
+static Q tw_lv(B A, Q v, Q w, D lim){
+  if(!w) return 0;
   Q h=dispatch(VM, VBM, v, 0, w);
-  if(ii(w)){Q z=ln(1);zid(z,0,h);return z;}
+  B sw=sh(w);
+  if(lim==0 || sw==0 || sw!=1){
+    Q z=ln(1);zid(z,0,h);return z;
+  }
   D nw=n(w);
   Q s=ln(nw);
   D md=0;
+  D next_lim = (lim < 0) ? -1 : (lim - 1);
   for(D i=0;i<nw;i++){
-    pid(s,i,lvs(A,v,0,qi(w,i)));
+    pid(s, i, tw_lv(A, v, qi(w, i), next_lim));
     D d=n(pi(s,i));
     if(d>md)md=d;
   }
@@ -3504,44 +3508,11 @@ Q lvs(B A,Q v,Q a,Q w){
   for(D i=0;i<nw;i++)dr(pi(s,i));
   return z;
 }
-Q lvl(B A,Q v,Q a,Q w){
-  if(!a)return dispatch(VM, VBM, v, 0, w);
-  D d=di(a);
-  if(0==d)return dispatch(VM, VBM, v, 0, w);
-  if(ii(w))return dispatch(VM, VBM, v, 0, w);
-  D nw=n(w);Q z=ln(nw);
-  for(D i=0;i<nw;i++){
-    Q r=lvl(A,v,an(d-1),qi(w,i));
-    zid(z,i,r);
-  }
-  return z;
-}
-Q lsl(B A,Q v,Q a,Q w){
-  D limit=a?di(a):0;
-  Q h=dispatch(VM, VBM, v, 0, w);
-  if(0==limit||ii(w)){Q z=ln(1);zid(z,0,h);return z;}
-  D nw=n(w);
-  Q s=ln(nw);
-  D md=0;
-  for(D i=0;i<nw;i++){
-    pid(s,i,lsl(A,v,an(limit-1),qi(w,i)));
-    D d=n(pi(s,i));
-    if(d>md)md=d;
-  }
-  Q z=ln(1+md);
-  zid(z,0,h);
-  for(D d=0;d<md;d++){
-    Q r=ln(nw);
-    for(D i=0;i<nw;i++){
-      Q si=pi(s,i);D sn=n(si);
-      Q val=qi(si,d<sn?d:sn-1);
-      zid(r,i,val);
-    }
-    zid(z,d+1,r);
-  }
-  for(D i=0;i<nw;i++)dr(pi(s,i));
-  return z;
-}
+
+Q lfa(B A,Q v,Q a,Q w){ return tw_map(A, v, a, w, -1, a!=0); }
+Q lvs(B A,Q v,Q a,Q w){ if(a) return ae(2); return tw_lv(A, v, w, -1); }
+Q lvl(B A,Q v,Q a,Q w){ if(!a) return dispatch(VM, VBM, v, 0, w); return tw_map(A, v, 0, w, di(a), 0); }
+Q lsl(B A,Q v,Q a,Q w){ D lim=a?di(a):0; return tw_lv(A, v, w, lim); }
 Q itr(B A,Q v,Q a,Q w){
   if(!a)return ae(2);
   D n=di(a);
@@ -3578,8 +3549,8 @@ Q ticks(B A, Q v, Q a, Q w);
 Q ev(B A, Q v, Q a, Q w);
 Q bench(B A, Q v, Q a, Q w);
 Q aply(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd,0};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm,reprm};
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd,0,0};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm,reprm,prm};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -3621,6 +3592,7 @@ static const BM VBM[VTZ]={
   /* 36 */ NB, // lex2
   /* 37 */ NB, // text
   /* 38 */ NB, // repr
+  /* 39 */ NB, // pr
 };
 
 static const BM VBD[VTZ]={
@@ -3663,8 +3635,9 @@ static const BM VBD[VTZ]={
   /* 36 */ NB, // lex2
   /* 37 */ NB, // text
   /* 38 */ NB, // repr
+  /* 39 */ NB, // pr
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text","repr"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text","repr","pr"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -3725,7 +3698,7 @@ Q arena(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a; (void)w;
   printf("AB[0] AC[0] AI[0] %lld %lld %lld\n", (long long)AB[0], (long long)AC[0], (long long)AI[0]);
   printf("AB[1] AC[1] AI[1] %lld %lld %lld\n", (long long)AB[1], (long long)AC[1], (long long)AI[1]);
-  return tsna(0,4,1,3,0,0); // missing (print-only)
+  return mis(); // missing (print-only)
 }
 
 
@@ -3838,7 +3811,7 @@ Q bench(B A, Q v, Q a, Q w){
   }
 
   Q start = now_ns_u64();
-  Q last = tsna(0,4,1,3,0,0); // missing
+  Q last = mis(); // missing
   Q ai0_peak_units = 0;
   for(D i=0;i<iters;i++){
     // Rewind temp arena allocations each iteration (except the last) so benchmarks
@@ -4225,7 +4198,7 @@ static Q eif(Q** q){
     return elsev;
   }
 
-  return tsna(0,4,1,3,0,0); // missing
+  return mis(); // missing
 }
 
 static inline B is_lambda_obj(Q q){
@@ -4375,7 +4348,7 @@ static inline Q resolve_ref(Q env, Q ref){
 }
 
 Q E(Q** q, C tc, B capture){
-  Q missing = tsna(0,4,1,3,0,0);                                                  // "missing" sentinel
+  Q missing = mis();                                                              // "missing" sentinel
   Q r = missing;                                                                  // last statement result (or missing)
   D clp=LP;                                                                       // capture the list builder index for this call
   for(;;){
@@ -4414,11 +4387,11 @@ Q E(Q** q, C tc, B capture){
 
 Q e(Q** q){
   Q a=**q;
-  if(!a) return tsna(0,4,1,3,0,0);                                              // missing
+  if(!a) return mis();                                                          // missing
   if(is_err(a)){ (*q)++; return a; }
   if(34==t(a)){
     C c = (C)dc(a);
-    if(';'==c || '\n'==c){(*q)++; return tsna(0,4,1,3,0,0);}                     // terminator => missing
+    if(';'==c || '\n'==c){(*q)++; return mis();}                                 // terminator => missing
     if('{'==c){
       Q next = (*q)[1];
       Q noun = (next && 34==t(next) && '['==(C)dc(next)) ? elam(q) : eoc(q);
@@ -4669,28 +4642,30 @@ static inline B ends_with_dot_l(const char* s){
 
 static inline B qstr_to_c(Q w, C* out, D out_cap){
   if(!out || !out_cap) return 0;
-  if(t(w)!=6) return 0;
-  D n_w = n(w);
-  if(n_w >= out_cap) n_w = out_cap - 1;
-  for(D i=0;i<n_w;i++) out[i] = (C)pi(w,i);
-  out[n_w] = 0;
+  const C* src = 0;
+  D len = 0;
+  C one = 0;
+  Q err = qchar_src(w, &src, &len, &one);
+  if(err) return 0;
+  if(len < 0) return 0;
+  D take = len;
+  if(take >= out_cap) take = out_cap - 1;
+  if(take) memcpy(out, src, (size_t)take);
+  out[take] = 0;
   return 1;
 }
 
 static inline D ascii_adv_id(const C* p){
+  static const char* AT_ASCII2[ATZ] = {
+    0,0,
+    "->","<-","<'","'>","'v","'^","<o","o>","/'","\\'","<p","p>",
+  };
   C a=p[0], b=p[1];
-  if(a=='-' && b=='>') return 2;   // →
-  if(a=='<' && b=='-') return 3;   // ←
-  if(a=='<' && b=='\'') return 4;  // ↰
-  if(a=='\''&& b=='>') return 5;   // ↱
-  if(a=='\''&& b=='v') return 6;   // ↓
-  if(a=='\''&& b=='^') return 7;   // ↑
-  if(a=='<' && b=='o') return 8;   // ↺
-  if(a=='o' && b=='>') return 9;   // ↻
-  if(a=='/' && b=='\'') return 10; // ↿
-  if(a=='\\'&& b=='\'') return 11; // ⇃
-  if(a=='<' && b=='p') return 12;  // ↫
-  if((a=='p' || a=='q') && b=='>') return 13;  // ↬ (support both p> and q>)
+  if(a=='q' && b=='>') return 13; // accept q> as alias for p>
+  for(D i=2;i<(D)ATZ;i++){
+    const char* s = AT_ASCII2[i];
+    if(s && s[0]==a && s[1]==b) return i;
+  }
   return 0;
 }
 
@@ -4733,7 +4708,7 @@ static inline B dump_tokens_enabled(void){
 
 static Q eval_lexed_tokens(Q* tokens_base){
   Q* tokens = tokens_base;
-  Q r = tsna(0,4,1,3,0,0); // missing
+  Q r = mis(); // missing
   for(;;){
     if(LP>0){
       C tc = LC[LP] ? LC[LP] : ')';

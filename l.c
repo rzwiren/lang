@@ -1794,28 +1794,117 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 38
+#define VTZ 39
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-void pr_b(Q q,D b){if(q<b){printf("%c",MAP[q]);return;}pr_b(q/b,b);printf("%c",MAP[q%b]);}
 
-static void pr_sym_payload(Q idq){
+typedef struct {
+  char buf[4096];
+  size_t len;
+} StdoutBuf;
+
+static void stdoutbuf_flush(StdoutBuf* b){
+  if(!b || !b->len) return;
+  fwrite(b->buf, 1, b->len, stdout);
+  b->len = 0;
+}
+
+static void stdoutbuf_write(StdoutBuf* b, const char* s, size_t n){
+  if(!b || !s || !n) return;
+  while(n){
+    size_t cap = sizeof(b->buf);
+    size_t rem = cap - b->len;
+    if(!rem){ stdoutbuf_flush(b); rem = cap; }
+    size_t take = (n < rem) ? n : rem;
+    memcpy(b->buf + b->len, s, take);
+    b->len += take;
+    s += take;
+    n -= take;
+  }
+}
+
+typedef struct {
+  Q q;
+  D len;
+  Q err;
+} QStrBuf;
+
+typedef struct {
+  void* ctx;
+  void (*write)(void* ctx, const char* s, size_t n);
+} L_Out;
+
+static inline void out_write(L_Out* out, const char* s, size_t n){
+  if(!out || !out->write) return;
+  out->write(out->ctx, s, n);
+}
+
+static inline void out_putc(L_Out* out, C c){
+  out_write(out, &c, 1);
+}
+
+static inline void out_puts(L_Out* out, const char* s){
+  if(!s) return;
+  out_write(out, s, strlen(s));
+}
+
+static void out_put_u64_dec(L_Out* out, Q x){
+  C buf[32];
+  int i = 0;
+  do{
+    Q q = x / 10ULL;
+    Q r = x - q*10ULL;
+    buf[i++] = (C)('0' + (C)r);
+    x = q;
+  }while(x && i < (int)sizeof(buf));
+  for(int j=i-1;j>=0;--j) out_putc(out, buf[j]);
+}
+
+static void out_put_i64_dec(L_Out* out, J x){
+  if(x < 0){
+    out_putc(out, '-');
+    Q ux = (Q)(-(x+1)) + 1ULL;
+    out_put_u64_dec(out, ux);
+    return;
+  }
+  out_put_u64_dec(out, (Q)x);
+}
+
+static void out_pr_b(L_Out* out, Q q, D b){
+  if(q < (Q)b){ out_putc(out, MAP[q]); return; }
+  out_pr_b(out, q / (Q)b, b);
+  out_putc(out, MAP[q % (Q)b]);
+}
+
+static inline B int_vec_is_til(Q q){
+  if(!ip(q) || t(q)!=T_INT || sh(q)!=1) return 0;
+  D nq = n(q);
+  const Q* bits = (const Q*)p(q);
+  for(D i=0;i<nq;i++){
+    if((J)bits[i] != (J)i) return 0;
+  }
+  return 1;
+}
+
+static void out_print_q(L_Out* out, Q q); // forward
+
+static void out_pr_sym_payload(L_Out* out, Q idq){
   Q payload = idq;
   if(SYM_PAYLOAD_IS_INTERN(payload)){
     D id = (D)SYM_PAYLOAD_VAL(payload);
     if(SYM_TAB && ip(SYM_TAB) && sh(SYM_TAB)==1 && id < n(SYM_TAB)){
       Q name = pi(SYM_TAB, id);
       if(t(name)==T_CHAR && sh(name)==1){
-        fwrite(p(name), 1, (size_t)n(name), stdout);
+        out_write(out, (const char*)p(name), (size_t)n(name));
         return;
       }
     }
   }else{
-    pr_b(SYM_PAYLOAD_VAL(payload), 62);
+    out_pr_b(out, SYM_PAYLOAD_VAL(payload), 62);
     return;
   }
-  pr_b(payload, 62);
+  out_pr_b(out, payload, 62);
 }
 
 // Tag64 printing: `$` prefix + base64 digits (alphabet is: _ A-Z a-z 0-9 .)
@@ -1827,9 +1916,9 @@ static inline C tag64_digit_char(D v){
   return '.';
 }
 
-static void pr_tag64_payload(Q payload){
+static void out_pr_tag64_payload(L_Out* out, Q payload){
   // Canonical minimal digit form; leading '_' digits (zeros) are omitted. payload==0 prints as just "$".
-  printf("$");
+  out_putc(out, '$');
   if(payload==0) return;
   C buf[16];
   D nbuf=0;
@@ -1839,47 +1928,51 @@ static void pr_tag64_payload(Q payload){
     payload >>= 6;
   }
   for(D i=0;i<nbuf;i++){
-    putchar(buf[nbuf-1-i]);
+    out_putc(out, buf[nbuf-1-i]);
   }
 }
 
-static inline void pr_f64(double x){
-  if(isnan(x)){ printf("nan"); return; }
-  if(isinf(x)){ printf("%sinf", x<0 ? "-" : ""); return; }
+static inline void out_pr_f64(L_Out* out, double x){
+  if(isnan(x)){ out_puts(out, "nan"); return; }
+  if(isinf(x)){ if(x<0) out_putc(out, '-'); out_puts(out, "inf"); return; }
   C buf[80];
   int n = compiler_snprintf17g(buf, sizeof(buf), x);
-  if(n <= 0){ printf("nan"); return; }
+  if(n <= 0){ out_puts(out, "nan"); return; }
   B has_dot=0, has_exp=0;
   for(int i=0;i<n;i++){ if(buf[i]=='.') has_dot=1; else if(buf[i]=='e' || buf[i]=='E') has_exp=1; }
-  if(!has_dot && !has_exp) printf("%s.0", buf);
-  else printf("%s", buf);
-}
-
-static inline void pr_adv_ascii(D ai){
-  switch(ai){
-    case 0: return;
-    case 1: printf("'"); return;
-    case 2: printf("->"); return;
-    case 3: printf("<-"); return;
-    case 4: printf("<'"); return;
-    case 5: printf("'>"); return;
-    case 6: printf("'v"); return;
-    case 7: printf("'^"); return;
-    case 8: printf("<o"); return;
-    case 9: printf("o>"); return;
-    case 10: printf("/'"); return;
-    case 11: printf("\\'"); return;
-    case 12: printf("<p"); return;
-    case 13: printf("p>"); return;
-    default: printf("%s", (ai < (D)ATZ) ? AT[ai] : "?"); return;
+  if(!has_dot && !has_exp){
+    out_write(out, buf, (size_t)n);
+    out_puts(out, ".0");
+  }else{
+    out_write(out, buf, (size_t)n);
   }
 }
 
-static inline void pr_control_ascii(Q q){
+static inline void out_pr_adv_ascii(L_Out* out, D ai){
+  switch(ai){
+    case 0: return;
+    case 1: out_putc(out, '\''); return;
+    case 2: out_puts(out, "->"); return;
+    case 3: out_puts(out, "<-"); return;
+    case 4: out_puts(out, "<'"); return;
+    case 5: out_puts(out, "'>"); return;
+    case 6: out_puts(out, "'v"); return;
+    case 7: out_puts(out, "'^"); return;
+    case 8: out_puts(out, "<o"); return;
+    case 9: out_puts(out, "o>"); return;
+    case 10: out_puts(out, "/'"); return;
+    case 11: out_puts(out, "\\'"); return;
+    case 12: out_puts(out, "<p"); return;
+    case 13: out_puts(out, "p>"); return;
+    default: out_puts(out, (ai < (D)ATZ) ? AT[ai] : "?"); return;
+  }
+}
+
+static inline void out_pr_control_ascii(L_Out* out, Q q){
   Q code = dc(q);
-  if(code=='\n'){ putchar('\n'); return; }
-  if(code>=32 && code<=126){ putchar((C)code); return; }
-  pr(q);
+  if(code=='\n'){ out_putc(out, '\n'); return; }
+  if(code>=32 && code<=126){ out_putc(out, (C)code); return; }
+  out_print_q(out, q);
 }
 
 static inline const char* err_name(Q code){
@@ -1893,9 +1986,9 @@ static inline const char* err_name(Q code){
   }
 }
 
-static void pr_lambda_roundtrip(Q lam);
+static void out_pr_lambda_roundtrip(L_Out* out, Q lam);
 
-static inline void pr_verb_roundtrip(Q v){
+static inline void out_pr_verb_roundtrip(L_Out* out, Q v){
   Q vv=v;
   D advs[32];D nadv=0;
   while(dv(vv)>=(Q)VTZ && nadv<32){
@@ -1904,39 +1997,39 @@ static inline void pr_verb_roundtrip(Q v){
     vv=av(x/(Q)ATZ);
   }
   Q base=dv(vv);
-  printf("%s", base<(Q)VTZ ? VT[base] : "?");
-  for(D i=nadv;i>0;--i) pr_adv_ascii(advs[i-1]);
+  out_puts(out, base<(Q)VTZ ? VT[base] : "?");
+  for(D i=nadv;i>0;--i) out_pr_adv_ascii(out, advs[i-1]);
 }
 
-static inline void pr_token_roundtrip(Q tok){
+static inline void out_pr_token_roundtrip(L_Out* out, Q tok){
   if(!tok) return;
-  if(34==t(tok) && sh(tok)==0){ pr_control_ascii(tok); return; }
-  if(18==t(tok) && sh(tok)==0){ pr_adv_ascii((D)da(tok)); return; }
-  if(2==t(tok) && sh(tok)==0){ pr_verb_roundtrip(tok); return; }
-  if(T_LAMBDA==t(tok)){ pr_lambda_roundtrip(tok); return; }
-  pr(tok);
+  if(34==t(tok) && sh(tok)==0){ out_pr_control_ascii(out, tok); return; }
+  if(18==t(tok) && sh(tok)==0){ out_pr_adv_ascii(out, (D)da(tok)); return; }
+  if(2==t(tok) && sh(tok)==0){ out_pr_verb_roundtrip(out, tok); return; }
+  if(T_LAMBDA==t(tok)){ out_pr_lambda_roundtrip(out, tok); return; }
+  out_print_q(out, tok);
 }
 
-static void pr_lambda_roundtrip(Q lam){
-  if(!ip(lam) || t(lam)!=T_LAMBDA || sh(lam)!=1 || n(lam)!=2){ pr(lam); return; }
+static void out_pr_lambda_roundtrip(L_Out* out, Q lam){
+  if(!ip(lam) || t(lam)!=T_LAMBDA || sh(lam)!=1 || n(lam)!=2){ out_print_q(out, lam); return; }
   Q params = pi(lam, 0);
   Q body = pi(lam, 1);
-  if(!ip(params) || t(params)!=T_SYM || sh(params)!=1){ pr(lam); return; }
-  if(!ip(body) || t(body)!=0 || sh(body)!=1){ pr(lam); return; }
+  if(!ip(params) || t(params)!=T_SYM || sh(params)!=1){ out_print_q(out, lam); return; }
+  if(!ip(body) || t(body)!=0 || sh(body)!=1){ out_print_q(out, lam); return; }
 
-  printf("{[");
+  out_puts(out, "{[");
   D np = n(params);
   for(D i=0;i<np;i++){
-    if(i) printf(";");
-    pr_sym_payload(pi(params, i));
+    if(i) out_putc(out, ';');
+    out_pr_sym_payload(out, pi(params, i));
   }
-  printf("]");
+  out_putc(out, ']');
 
   D nt = n(body);
   if(nt){
     // Add a single space before the body unless it starts with a statement terminator/newline.
     Q t0 = pi(body, 0);
-    if(!(34==t(t0) && sh(t0)==0 && (';'==(C)dc(t0) || '\n'==(C)dc(t0)))) putchar(' ');
+    if(!(34==t(t0) && sh(t0)==0 && (';'==(C)dc(t0) || '\n'==(C)dc(t0)))) out_putc(out, ' ');
 
     for(D i=0;i<nt;i++){
       Q cur = pi(body, i);
@@ -1944,125 +2037,262 @@ static void pr_lambda_roundtrip(Q lam){
         Q prev = pi(body, i-1);
         B prev_is_ctl = (34==t(prev) && sh(prev)==0);
         B cur_is_ctl = (34==t(cur) && sh(cur)==0);
-        if(!prev_is_ctl && !cur_is_ctl) putchar(' ');
+        if(!prev_is_ctl && !cur_is_ctl) out_putc(out, ' ');
       }
-      pr_token_roundtrip(cur);
+      out_pr_token_roundtrip(out, cur);
     }
   }
 
-  printf("}");
+  out_putc(out, '}');
+}
+
+static void out_print_q(L_Out* out, Q q){
+  if(!q) return;
+  B tq = t(q);
+  B sq = sh(q);
+
+  if(tq==0){
+    if(!sq){
+      out_puts(out, "atom type 0?");
+      out_put_i64_dec(out, (J)q);
+      out_putc(out, ' ');
+      return;
+    }
+    if(sq==1){
+      out_putc(out, '(');
+      D nq = n(q);
+      for(D i=0;i<nq;i++){
+        out_print_q(out, pi(q,i));
+        if(i+1 < nq) out_putc(out, ';');
+      }
+      out_putc(out, ')');
+      return;
+    }
+    if(sq==2){
+      out_putc(out, '{');
+      Q kq = pi(q,1);
+      Q vq = pi(q,2);
+      D nk = n(kq);
+      for(D i=0;i<nk;i++){
+        out_print_q(out, pi(kq,i));
+        out_putc(out, ':');
+        out_print_q(out, qi(vq,i));
+        out_putc(out, (i+1==nk) ? '}' : ';');
+      }
+      return;
+    }
+  }
+
+  if(tq==1){
+    if(sq==0){
+      out_pr_sym_payload(out, ip(q) ? pi(q,0) : di(q));
+      return;
+    }
+    if(sq==1){
+      D nq=n(q);
+      for(D i=0;i<nq;i++){
+        if(i) out_putc(out, '.');
+        out_pr_sym_payload(out, pi(q,i));
+      }
+      return;
+    }
+    out_pr_sym_payload(out, ip(q) ? pi(q,0) : di(q));
+    return;
+  }
+
+  if(tq==2){
+    out_pr_verb_roundtrip(out, q);
+    return;
+  }
+
+  if(tq==T_ADV){
+    out_pr_adv_ascii(out, (D)da(q));
+    return;
+  }
+
+  if(tq==T_LAMBDA){
+    out_pr_lambda_roundtrip(out, q);
+    return;
+  }
+
+  if(tq==T_ERR){
+    Q code = de(q);
+    const char* name = err_name(code);
+    if(name){ out_puts(out, "err:"); out_puts(out, name); }
+    else{ out_puts(out, "err:"); out_put_u64_dec(out, code); }
+    return;
+  }
+
+  if(tq==T_CTL){
+    Q code = dc(q);
+    if(code==4){ out_puts(out, "nf"); return; }                                 // not found
+    if(code=='\n'){ out_puts(out, "ctl:\\n"); return; }
+    if(code==';'){ out_puts(out, "ctl:;"); return; }
+    if(code>=32 && code<=126){ out_puts(out, "ctl:"); out_putc(out, (C)code); return; }
+    out_puts(out, "ctl:");
+    out_put_u64_dec(out, code);
+    return;
+  }
+
+  if(tq==9){
+    out_puts(out, "file:");
+    out_put_u64_dec(out, (Q)AR_FID(di(q)));
+    return;
+  }
+
+  if(tq==T_CHAR){
+    if(sq==0){
+      out_putc(out, '"');
+      out_putc(out, (C)(ip(q)?pi(q,0):di(q)));
+      out_putc(out, '"');
+      return;
+    }
+    if(sq==1){
+      out_putc(out, '"');
+      D nq=n(q);
+      for(D i=0;i<nq;i++) out_putc(out, (C)pi(q,i));
+      out_putc(out, '"');
+      return;
+    }
+  }
+
+  if(tq==T_INT){
+    if(sq==0){
+      out_put_i64_dec(out, (J)(ip(q)?pi(q,0):di_int(q)));
+      return;
+    }
+    if(sq==1){
+      D nq = n(q);
+      if(!nq){ out_puts(out, "!0"); return; }
+      if(nq >= 1024 && int_vec_is_til(q)){
+        out_putc(out, '!');
+        out_put_u64_dec(out, (Q)nq);
+        return;
+      }
+      for(D i=0;i<nq;i++){
+        out_put_i64_dec(out, (J)pi(q,i));
+        if(i+1 < nq) out_putc(out, ' ');
+      }
+      return;
+    }
+  }
+
+  if(tq==T_FLT){
+    if(sq==0){
+      out_pr_f64(out, f64_from_bits(pi(q,0)));
+      return;
+    }
+    if(sq==1){
+      D nq = n(q);
+      if(!nq){ out_puts(out, "!0"); return; }
+      for(D i=0;i<nq;i++){
+        out_pr_f64(out, f64_from_bits(pi(q,i)));
+        if(i+1 < nq) out_putc(out, ' ');
+      }
+      return;
+    }
+  }
+
+  if(tq==T_TAG){
+    if(sq==0){
+      out_pr_tag64_payload(out, ip(q)?pi(q,0):di(q));
+      return;
+    }
+    if(sq==1){
+      D nq=n(q);
+      for(D i=0;i<nq;i++){
+        if(i) out_putc(out, ' ');
+        out_pr_tag64_payload(out, pi(q,i));
+      }
+      return;
+    }
+  }
+
+  if(tq==4){
+    D nq=n(q);
+    for(D i=0;i<nq;i++) out_print_q(out, pi(q,i));
+    return;
+  }
+
+  if(tq==5){
+    out_puts(out, "hash table: ");
+    D c = cp(q);
+    for(D i=0;i<c;i++){
+      out_put_u64_dec(out, (Q)i);
+      out_putc(out, ':');
+      out_put_i64_dec(out, (J)pi(q,i));
+      out_putc(out, ' ');
+    }
+    out_putc(out, '\n');
+    return;
+  }
+
+  if(tq==T_SYM){
+    // Interned symbol printing: show original bytes if present in symtab, else base62 payload.
+    if(sq==0){
+      out_putc(out, '`');
+      out_pr_sym_payload(out, ip(q)?pi(q,0):di(q));
+      return;
+    }
+    if(sq==1){
+      D nq=n(q);
+      for(D i=0;i<nq;i++){
+        if(i) out_putc(out, ' ');
+        out_putc(out, '`');
+        out_pr_sym_payload(out, pi(q,i));
+      }
+      return;
+    }
+    out_putc(out, '`');
+    out_pr_b(out, ip(q)?pi(q,0):di(q), 62);
+    return;
+  }
+}
+
+static void out_write_stdout(void* ctx, const char* s, size_t n){
+  stdoutbuf_write((StdoutBuf*)ctx, s, n);
+}
+
+static void out_write_qstr(void* ctx, const char* s, size_t n){
+  QStrBuf* b = (QStrBuf*)ctx;
+  if(!b || b->err || !s || !n) return;
+  if(n > 0x7FFFFFFFULL){ b->err = ae(99); return; }
+  D add = (D)n;
+  D need = b->len + add;
+  if(need > cp(b->q)){
+    Q nq = grow(b->q, need);
+    if(is_err(nq)){ b->err = nq; return; }
+    if(nq != b->q) dr(b->q);
+    b->q = nq;
+  }
+  memcpy((C*)p(b->q) + b->len, s, n);
+  b->len = need;
+  ptr(b->q)[4] = b->len;
 }
 
 void pr(Q q){
-  if(0==q){return;}
-  if(0==t(q)){
-    if(!sh(q)){printf("atom type 0?%lld ",q);}
-    if(1==sh(q)){printf("(");D nq=n(q);for(D i=0;i<nq;i++){pr(pi(q,i));if(i<nq-1){printf(";");}}; printf(")");}
-    if(2==sh(q)){
-      //pr(pi(q,0)); // print hash
-      printf("{");
-      Q kq = pi(q,1);Q nkq=n(kq);
-      for(D i=0; i<n(kq); ++i){
-        pr(pi(kq,i)); printf(":");
-        pr(qi(pi(q,2),i));printf(i==nkq-1?"}":";");
-      }
-    }
-  }
-  if(1==t(q)){
-    if(sh(q)==0){
-      pr_sym_payload(ip(q)?pi(q,0):di(q));
-    }else if(sh(q)==1){
-      D nq=n(q);
-      for(D i=0;i<nq;i++){
-        if(i) putchar('.');
-        pr_sym_payload(pi(q,i));
-      }
-    }else{
-      pr_sym_payload(ip(q)?pi(q,0):di(q));
-    }
-  }
-  if(2==t(q)){
-    Q v=q;
-    D advs[32];D nadv=0;
-    while(dv(v)>=(Q)VTZ && nadv<32){
-      Q x=dv(v)-(Q)VTZ;
-      advs[nadv++]=(D)(x%(Q)ATZ)+1;
-      v=av(x/(Q)ATZ);
-    }
-    Q base=dv(v);
-    printf("%s", base<(Q)VTZ ? VT[base] : "?");
-    for(D i=nadv;i>0;--i){
-      D ai=advs[i-1];
-      if(ai<(D)ATZ) printf("%s",AT[ai]);
-    }
-  }
-  if(18==t(q)){printf("%s",AT[da(q)]);}
-  if(T_LAMBDA==t(q)){
-    pr_lambda_roundtrip(q);
-  }
-  if(T_ERR==t(q)){
-    Q code = de(q);
-    const char* name = err_name(code);
-    if(name) printf("err:%s", name);
-    else printf("err:%llu", (unsigned long long)code);
-    return;
-  }
-  if(T_CTL==t(q)){
-    Q code = dc(q);
-    if(code==4){ printf("nf"); return; }                                         // not found
-    if(code=='\n'){ printf("ctl:\\n"); return; }
-    if(code==';'){ printf("ctl:;"); return; }
-    if(code>=32 && code<=126){ printf("ctl:%c",(char)code); return; }
-    printf("ctl:%llu",(unsigned long long)code);
-    return;
-  }
-  if(9==t(q)){printf("file:%d", (int)AR_FID(di(q)));}
-  if(6==t(q)){
-    if(0==sh(q)){printf("\"%c\"",(char)(ip(q)?pi(q,0):di(q)));}
-    if(1==sh(q)){printf("\"");for(D i=0;i<n(q);i++)printf("%c",(char)pi(q,i));printf("\"");}
-  }
-  if(3==t(q)){
-    if(0==sh(q)){printf("%lld",(long long)(ip(q)?pi(q,0):di_int(q)));}
-    if(1==sh(q)){if(n(q)){for(D i=0;i<n(q);i++){printf("%lld",pi(q,i));if(i<n(q)-1){printf(" ");}}} else {printf("!0");}}
-  }
-  if(8==t(q)){
-    if(0==sh(q)){ pr_f64(f64_from_bits(pi(q,0))); }
-    if(1==sh(q)){
-      if(n(q)){
-        for(D i=0;i<n(q);i++){ pr_f64(f64_from_bits(pi(q,i))); if(i<n(q)-1) printf(" "); }
-      }else{
-        printf("!0");
-      }
-    }
-  }
-  if(T_TAG==t(q)){
-    if(0==sh(q)){ pr_tag64_payload(ip(q)?pi(q,0):di(q)); }
-    if(1==sh(q)){
-      D nq=n(q);
-      for(D i=0;i<nq;i++){
-        if(i) printf(" ");
-        pr_tag64_payload(pi(q,i));
-      }
-    }
-  }
-  if(4==t(q)){for(D i=0;i<n(q);i++){pr(pi(q,i));}}
-  if(5==t(q)){printf("hash table: ");for(D i=0;i<cp(q);i++){printf("%d:%lld ",i,pi(q,i));}printf("\n");}
-  if(7==t(q)){
-    // Interned symbol printing: show original bytes if present in symtab, else base62 payload.
-    if(sh(q)==0){
-      printf("`");
-      pr_sym_payload(ip(q)?pi(q,0):di(q));
-    }else if(sh(q)==1){
-      D nq=n(q);
-      for(D i=0;i<nq;i++){
-        if(i) printf(" ");
-        printf("`");
-        pr_sym_payload(pi(q,i));
-      }
-    }else{
-      printf("`");pr_b(ip(q)?pi(q,0):di(q),62);
-    }
-  }
+  StdoutBuf sb;
+  sb.len = 0;
+  L_Out out;
+  out.ctx = &sb;
+  out.write = out_write_stdout;
+  out_print_q(&out, q);
+  stdoutbuf_flush(&sb);
+}
+
+Q reprm(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  QStrBuf b;
+  b.q = vca(0, T_CHAR, 0, 64);
+  if(is_err(b.q)) return b.q;
+  b.len = 0;
+  b.err = 0;
+  L_Out out;
+  out.ctx = &b;
+  out.write = out_write_qstr;
+  out_print_q(&out, w);
+  if(b.err){ dr(b.q); return b.err; }
+  return b.q;
 }
 VF VD[VTZ];
 VF VM[VTZ];
@@ -2305,17 +2535,55 @@ static inline const NumOpSpec* numop_spec(NOP op){
 
 typedef Q(*NumKernel)(Q a, Q w, B sa, B sw, D nz);
 
+typedef struct {
+  B is_vec;
+  B is_flt;
+  const Q* vec_bits;
+  double scalar;
+} NumInF64;
+
+static inline NumInF64 numin_f64(Q q, B is_vec){
+  NumInF64 in;
+  in.is_vec = is_vec;
+  in.is_flt = (t(q) == T_FLT);
+  in.vec_bits = is_vec ? (const Q*)p(q) : 0;
+  in.scalar = is_vec ? 0.0 : num_f64_atom(q);
+  return in;
+}
+
+static inline double numin_f64_at(const NumInF64* in, D i){
+  if(!in->is_vec) return in->scalar;
+  Q bits = in->vec_bits[i];
+  return in->is_flt ? f64_from_bits(bits) : (double)(J)bits;
+}
+
+typedef struct {
+  B is_vec;
+  const Q* vec_bits;
+  Q scalar_bits;
+} NumInI64;
+
+static inline NumInI64 numin_i64(Q q, B is_vec){
+  NumInI64 in;
+  in.is_vec = is_vec;
+  in.vec_bits = is_vec ? (const Q*)p(q) : 0;
+  in.scalar_bits = is_vec ? 0 : num_int_bits_atom(q);
+  return in;
+}
+
+static inline Q numin_i64_bits_at(const NumInI64* in, D i){
+  return in->is_vec ? in->vec_bits[i] : in->scalar_bits;
+}
+
 static Q k_add_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) + num_f64_atom(w));
   Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    double x = numin_f64_at(&av, i);
+    double y = numin_f64_at(&wv, i);
     out[i] = f64_bits(x + y);
   }
   return z;
@@ -2324,13 +2592,11 @@ static Q k_mul_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) * num_f64_atom(w));
   Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    double x = numin_f64_at(&av, i);
+    double y = numin_f64_at(&wv, i);
     out[i] = f64_bits(x * y);
   }
   return z;
@@ -2339,13 +2605,11 @@ static Q k_sub_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) - num_f64_atom(w));
   Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    double x = numin_f64_at(&av, i);
+    double y = numin_f64_at(&wv, i);
     out[i] = f64_bits(x - y);
   }
   return z;
@@ -2354,13 +2618,11 @@ static Q k_min_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0){ double x=num_f64_atom(a), y=num_f64_atom(w); return af(0, x<y?x:y); }
   Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    double x = numin_f64_at(&av, i);
+    double y = numin_f64_at(&wv, i);
     out[i] = f64_bits(x<y?x:y);
   }
   return z;
@@ -2369,13 +2631,11 @@ static Q k_max_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0){ double x=num_f64_atom(a), y=num_f64_atom(w); return af(0, x>y?x:y); }
   Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    double x = numin_f64_at(&av, i);
+    double y = numin_f64_at(&wv, i);
     out[i] = f64_bits(x>y?x:y);
   }
   return z;
@@ -2384,13 +2644,11 @@ static Q k_div_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, num_f64_atom(a) / num_f64_atom(w));
   Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    double x = numin_f64_at(&av, i);
+    double y = numin_f64_at(&wv, i);
     out[i] = f64_bits(x / y);
   }
   return z;
@@ -2399,13 +2657,11 @@ static Q k_mod_f(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return af(0, fmod(num_f64_atom(a), num_f64_atom(w)));
   Q z=num_can_inplace_w_vec(w, T_FLT, nz) ? w : vne_u(0, T_FLT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
+    double x = numin_f64_at(&av, i);
+    double y = numin_f64_at(&wv, i);
     out[i] = f64_bits(fmod(x, y));
   }
   return z;
@@ -2415,14 +2671,10 @@ static Q k_add_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) + num_int_bits_atom(w)));
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    Q x = sa ? ap[i] : ax0;
-    Q y = sw ? wp[i] : wx0;
-    out[i] = x + y;
+    out[i] = numin_i64_bits_at(&av, i) + numin_i64_bits_at(&wv, i);
   }
   return z;
 }
@@ -2430,14 +2682,10 @@ static Q k_mul_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) * num_int_bits_atom(w)));
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    Q x = sa ? ap[i] : ax0;
-    Q y = sw ? wp[i] : wx0;
-    out[i] = x * y;
+    out[i] = numin_i64_bits_at(&av, i) * numin_i64_bits_at(&wv, i);
   }
   return z;
 }
@@ -2445,14 +2693,10 @@ static Q k_sub_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) - num_int_bits_atom(w)));
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    Q x = sa ? ap[i] : ax0;
-    Q y = sw ? wp[i] : wx0;
-    out[i] = x - y;
+    out[i] = numin_i64_bits_at(&av, i) - numin_i64_bits_at(&wv, i);
   }
   return z;
 }
@@ -2463,13 +2707,11 @@ static Q k_min_i(Q a,Q w,B sa,B sw,D nz){
   }
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    Q x = sa ? ap[i] : ax0;
-    Q y = sw ? wp[i] : wx0;
+    Q x = numin_i64_bits_at(&av, i);
+    Q y = numin_i64_bits_at(&wv, i);
     out[i] = ((J)x < (J)y) ? x : y;
   }
   return z;
@@ -2481,13 +2723,11 @@ static Q k_max_i(Q a,Q w,B sa,B sw,D nz){
   }
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    Q x = sa ? ap[i] : ax0;
-    Q y = sw ? wp[i] : wx0;
+    Q x = numin_i64_bits_at(&av, i);
+    Q y = numin_i64_bits_at(&wv, i);
     out[i] = ((J)x > (J)y) ? x : y;
   }
   return z;
@@ -2496,14 +2736,10 @@ static Q k_band_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) & num_int_bits_atom(w)));
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    Q x = sa ? ap[i] : ax0;
-    Q y = sw ? wp[i] : wx0;
-    out[i] = x & y;
+    out[i] = numin_i64_bits_at(&av, i) & numin_i64_bits_at(&wv, i);
   }
   return z;
 }
@@ -2511,14 +2747,10 @@ static Q k_bor_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) | num_int_bits_atom(w)));
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    Q x = sa ? ap[i] : ax0;
-    Q y = sw ? wp[i] : wx0;
-    out[i] = x | y;
+    out[i] = numin_i64_bits_at(&av, i) | numin_i64_bits_at(&wv, i);
   }
   return z;
 }
@@ -2526,14 +2758,10 @@ static Q k_bxor_i(Q a,Q w,B sa,B sw,D nz){
   if(sa==0 && sw==0) return an((J)(num_int_bits_atom(a) ^ num_int_bits_atom(w)));
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    Q x = sa ? ap[i] : ax0;
-    Q y = sw ? wp[i] : wx0;
-    out[i] = x ^ y;
+    out[i] = numin_i64_bits_at(&av, i) ^ numin_i64_bits_at(&wv, i);
   }
   return z;
 }
@@ -2544,14 +2772,12 @@ static Q k_mod_i(Q a,Q w,B sa,B sw,D nz){
   }
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    J y = (J)(sw ? wp[i] : wx0);
+    J y = (J)numin_i64_bits_at(&wv, i);
     if(!y) return ae(2);
-    J x = (J)(sa ? ap[i] : ax0);
+    J x = (J)numin_i64_bits_at(&av, i);
     out[i] = (Q)floormod_j(x, y);
   }
   return z;
@@ -2563,14 +2789,12 @@ static Q k_floordiv_i(Q a,Q w,B sa,B sw,D nz){
   }
   Q z=num_can_inplace_w_vec(w, T_INT, nz) ? w : vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    J y = (J)(sw ? wp[i] : wx0);
+    J y = (J)numin_i64_bits_at(&wv, i);
     if(!y) return ae(2);
-    J x = (J)(sa ? ap[i] : ax0);
+    J x = (J)numin_i64_bits_at(&av, i);
     out[i] = (Q)floordiv_j(x, y);
   }
   return z;
@@ -2582,14 +2806,10 @@ static Q k_eq_f(Q a,Q w,B sa,B sw,D nz){
         (sa==1 && num_can_inplace_vec_bytes(a, 3, nz)) ? a :
         vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
-    out[i] = (Q)(x==y);
+    out[i] = (Q)(numin_f64_at(&av, i) == numin_f64_at(&wv, i));
   }
   if(z==a || z==w){ ptr(z)[0] = T_INT; ptr(z)[2] = 3; }
   return z;
@@ -2600,14 +2820,10 @@ static Q k_lt_f(Q a,Q w,B sa,B sw,D nz){
         (sa==1 && num_can_inplace_vec_bytes(a, 3, nz)) ? a :
         vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
-    out[i] = (Q)(x<y);
+    out[i] = (Q)(numin_f64_at(&av, i) < numin_f64_at(&wv, i));
   }
   if(z==a || z==w){ ptr(z)[0] = T_INT; ptr(z)[2] = 3; }
   return z;
@@ -2618,14 +2834,10 @@ static Q k_gt_f(Q a,Q w,B sa,B sw,D nz){
         (sa==1 && num_can_inplace_vec_bytes(a, 3, nz)) ? a :
         vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  double ax0 = sa ? 0.0 : num_f64_atom(a);
-  double wx0 = sw ? 0.0 : num_f64_atom(w);
+  NumInF64 av = numin_f64(a, sa);
+  NumInF64 wv = numin_f64(w, sw);
   for(D i=0;i<nz;i++){
-    double x = sa ? ((t(a)==T_FLT) ? f64_from_bits(ap[i]) : (double)(J)ap[i]) : ax0;
-    double y = sw ? ((t(w)==T_FLT) ? f64_from_bits(wp[i]) : (double)(J)wp[i]) : wx0;
-    out[i] = (Q)(x>y);
+    out[i] = (Q)(numin_f64_at(&av, i) > numin_f64_at(&wv, i));
   }
   if(z==a || z==w){ ptr(z)[0] = T_INT; ptr(z)[2] = 3; }
   return z;
@@ -2636,14 +2848,12 @@ static Q k_eq_i(Q a,Q w,B sa,B sw,D nz){
         (sa==1 && num_can_inplace_w_vec(a, T_INT, nz)) ? a :
         vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    J x = (J)(sa ? ap[i] : ax0);
-    J y = (J)(sw ? wp[i] : wx0);
-    out[i] = (Q)(x==y);
+    J x = (J)numin_i64_bits_at(&av, i);
+    J y = (J)numin_i64_bits_at(&wv, i);
+    out[i] = (Q)(x == y);
   }
   return z;
 }
@@ -2653,14 +2863,12 @@ static Q k_lt_i(Q a,Q w,B sa,B sw,D nz){
         (sa==1 && num_can_inplace_w_vec(a, T_INT, nz)) ? a :
         vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    J x = (J)(sa ? ap[i] : ax0);
-    J y = (J)(sw ? wp[i] : wx0);
-    out[i] = (Q)(x<y);
+    J x = (J)numin_i64_bits_at(&av, i);
+    J y = (J)numin_i64_bits_at(&wv, i);
+    out[i] = (Q)(x < y);
   }
   return z;
 }
@@ -2670,14 +2878,12 @@ static Q k_gt_i(Q a,Q w,B sa,B sw,D nz){
         (sa==1 && num_can_inplace_w_vec(a, T_INT, nz)) ? a :
         vne_u(0, T_INT, 3, nz);
   Q* out = (Q*)p(z);
-  Q* ap = sa ? (Q*)p(a) : 0;
-  Q* wp = sw ? (Q*)p(w) : 0;
-  Q ax0 = sa ? 0 : num_int_bits_atom(a);
-  Q wx0 = sw ? 0 : num_int_bits_atom(w);
+  NumInI64 av = numin_i64(a, sa);
+  NumInI64 wv = numin_i64(w, sw);
   for(D i=0;i<nz;i++){
-    J x = (J)(sa ? ap[i] : ax0);
-    J y = (J)(sw ? wp[i] : wx0);
-    out[i] = (Q)(x>y);
+    J x = (J)numin_i64_bits_at(&av, i);
+    J y = (J)numin_i64_bits_at(&wv, i);
+    out[i] = (Q)(x > y);
   }
   return z;
 }
@@ -3372,8 +3578,8 @@ Q ticks(B A, Q v, Q a, Q w);
 Q ev(B A, Q v, Q a, Q w);
 Q bench(B A, Q v, Q a, Q w);
 Q aply(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm};
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd,0};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm,reprm};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -3414,6 +3620,7 @@ static const BM VBM[VTZ]={
   /* 35 */ NB, // lex
   /* 36 */ NB, // lex2
   /* 37 */ NB, // text
+  /* 38 */ NB, // repr
 };
 
 static const BM VBD[VTZ]={
@@ -3455,8 +3662,9 @@ static const BM VBD[VTZ]={
   /* 35 */ NB, // lex
   /* 36 */ NB, // lex2
   /* 37 */ NB, // text
+  /* 38 */ NB, // repr
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text","repr"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};

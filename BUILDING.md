@@ -61,6 +61,23 @@ Outputs: `./build/l_lin` and `./build/l_lin_asan`
 If you don't have a system compiler handy, `zig cc` can usually stand in for `cc`.
 Use the same flags as the corresponding `cc` command.
 
+## WASM (browser demo)
+
+Build a freestanding `lang.wasm` plus a tiny static web UI:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\build_wasm.ps1
+```
+
+Then serve the output directory and open it in your browser:
+
+```powershell
+cd build\\web
+python -m http.server
+```
+
+Open `http://127.0.0.1:8000/`.
+
 ## Tests
 
 After building `l.exe`, run:

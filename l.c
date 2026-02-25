@@ -43,13 +43,23 @@
   #define L_OS_POSIX 0
 #endif
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
-#include <errno.h>
-#include <math.h>
-#include <time.h>
+#if L_OS_WASM
+typedef unsigned int size_t;
+typedef unsigned int uintptr_t;
+#else
+  #include <stdint.h>
+  #include <stddef.h>
+#endif
+#if !L_OS_WASM
+  #include <string.h>
+#endif
+#if !L_OS_WASM
+  #include <stdlib.h>
+  #include <stdio.h>
+  #include <errno.h>
+  #include <math.h>
+  #include <time.h>
+#endif
 #if L_OS_WIN32
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN 1
@@ -71,6 +81,64 @@
   // WASM platform layer TBD (intentionally no OS headers here).
 #else
   #error "Unsupported platform (no headers selected)"
+#endif
+
+#if L_OS_WASM
+static size_t strlen(const char* s){
+  if(!s) return 0;
+  size_t n = 0;
+  while(s[n]) n++;
+  return n;
+}
+static int strcmp(const char* a, const char* b){
+  if(a==b) return 0;
+  if(!a) return -1;
+  if(!b) return 1;
+  while(*a && *b && *a==*b){ a++; b++; }
+  return (unsigned char)*a - (unsigned char)*b;
+}
+static void* memcpy(void* dst, const void* src, size_t n){
+  if(!dst || !src || !n) return dst;
+  unsigned char* d = (unsigned char*)dst;
+  const unsigned char* s = (const unsigned char*)src;
+  for(size_t i=0;i<n;i++) d[i] = s[i];
+  return dst;
+}
+static void* memset(void* dst, int c, size_t n){
+  if(!dst || !n) return dst;
+  unsigned char* d = (unsigned char*)dst;
+  unsigned char v = (unsigned char)c;
+  for(size_t i=0;i<n;i++) d[i] = v;
+  return dst;
+}
+static int memcmp(const void* a, const void* b, size_t n){
+  const unsigned char* pa = (const unsigned char*)a;
+  const unsigned char* pb = (const unsigned char*)b;
+  if(pa==pb || n==0) return 0;
+  if(!pa) return -1;
+  if(!pb) return 1;
+  for(size_t i=0;i<n;i++){
+    unsigned char xa = pa[i], xb = pb[i];
+    if(xa != xb) return (int)xa - (int)xb;
+  }
+  return 0;
+}
+static char* strchr(const char* s, int c){
+  if(!s) return 0;
+  char ch = (char)c;
+  for(; *s; s++){
+    if(*s == ch) return (char*)s;
+  }
+  return ch==0 ? (char*)s : 0;
+}
+
+static double fmod(double x, double y){
+  if(y == 0.0) return 0.0 / 0.0;
+  // Truncation-based fmod for typical demo inputs.
+  double q = x / y;
+  long long qi = (long long)q; // trunc toward zero
+  return x - (double)qi * y;
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -100,8 +168,10 @@ static void* platform_vm_alloc(Q bytes);
 static void platform_vm_free(void* base, Q bytes);
 static void platform_init_stdout_utf8_if_console(void);
 static B platform_stdin_is_console(void);
+static void platform_write_stdout_bytes(const char* s, size_t n);
 static void platform_write_stderr_bytes(const char* s, size_t n);
 static Q platform_now_ns_u64(void);
+static void platform_abort(void);
 static B platform_net_init_once(void);
 static B platform_tcp_listen_u16(W port, Q* out_listener);
 static B platform_tcp_accept(Q listener, Q* out_conn);
@@ -156,7 +226,10 @@ static inline D compiler_bsf64(Q x){
 }
 
 static inline int compiler_snprintf17g(C* buf, size_t buf_cap, double x){
-#if L_CC_MSVC
+#if L_OS_WASM
+  (void)buf; (void)buf_cap; (void)x;
+  return 0;
+#elif L_CC_MSVC
   return _snprintf(buf, buf_cap, "%.17g", x);
 #else
   return snprintf(buf, buf_cap, "%.17g", x);
@@ -210,7 +283,11 @@ static inline Q di_int(Q q){
 #define BUMP_UNIT_QS   (BUMP_UNIT_BYTES / sizeof(Q))
 #define BUDDY_UNIT_QS  (BUDDY_UNIT_BYTES / sizeof(Q))
 
-#define ARENA_SZ       (1ULL<<32)
+#if L_OS_WASM
+  #define ARENA_SZ       (1ULL<<26) // 64 MiB (WASM can't reserve 4 GiB)
+#else
+  #define ARENA_SZ       (1ULL<<32)
+#endif
 Q* AB[4];Q AI[4];Q AC[4];
 Q AM[4];
 Q AQ[4]={BUMP_UNIT_QS,BUDDY_UNIT_QS,BUMP_UNIT_QS,0};
@@ -350,7 +427,7 @@ static inline void commit_range(void* p, Q bytes){
 static inline Q bumpalloc_impl(B t, B s, B z, D n, D c, Q ar, B zero_payload){
   (void)ar;
   Q units = bump_units(z, c);
-  if(AI[0] + units > AC[0]) exit(1);
+  if(AI[0] + units > AC[0]) platform_abort();
   if(AI[0] + units > AM[0]){
     Q req = AI[0] + units;
     commit_range(AB[0] + AM[0] * BUMP_UNIT_QS, (req - AM[0]) * BUMP_UNIT_BYTES);
@@ -400,7 +477,7 @@ static inline Q buddyalloc_impl(B t, B s, B z, D n, D c, Q ar, B zero_payload){
 
   B i = ord;
   while(i < 32 && BF[i] == ~0ULL) i++;
-  if(i == 32) exit(1);
+  if(i == 32) platform_abort();
 
   Q off = BF[i];
   BF[i] = *(Q*)(AB[1] + off * BUDDY_UNIT_QS);
@@ -643,7 +720,7 @@ void Bid(B* b,B z,D i,Q d){
     default: memcpy(b+z*i, &d, z); return;
   }
 }
-void pid(Q q,D i,Q d){if(n(q)<=i){exit(1);return;};Bid(p(q),sz(q),i,d);}          // throw length error when i outside of n
+void pid(Q q,D i,Q d){if(n(q)<=i){platform_abort();return;};Bid(p(q),sz(q),i,d);} // throw length error when i outside of n
 void zid(Q q,D i,Q d){Q o=pi(q,i);ir(d);pid(q,i,d);dr(o);}
 void qid(Q q,D i,Q d){if(!t(q)){zid(q,i,d);}else{pid(q,i,d);}}
 
@@ -1229,8 +1306,8 @@ static inline Q sym_intern_bytes(const C* bytes, D len){
 #if L_OS_WIN32
 
 static void platform_arena_reserve_init(void){
-  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
-  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
+  AB[0]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[0]){platform_abort();}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
+  AB[1]=(Q*)VirtualAlloc(0, ARENA_SZ, MEM_RESERVE, PAGE_READWRITE);if(!AB[1]){platform_abort();}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 }
 
 static void platform_commit_range(void* p, Q bytes){
@@ -1262,6 +1339,14 @@ static B platform_stdin_is_console(void){
   return (hin && hin != INVALID_HANDLE_VALUE && GetConsoleMode(hin, &mode)) ? 1 : 0;
 }
 
+static void platform_write_stdout_bytes(const char* s, size_t n){
+  if(!s || !n) return;
+  HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+  if(!h || h==INVALID_HANDLE_VALUE) return;
+  DWORD wrote = 0;
+  WriteFile(h, s, (DWORD)n, &wrote, NULL);
+}
+
 static void platform_write_stderr_bytes(const char* s, size_t n){
   if(!s || !n) return;
   HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
@@ -1284,6 +1369,10 @@ static Q platform_now_ns_u64(void){
   Q sec = ticks / qpc_freq;
   Q rem = ticks % qpc_freq;
   return sec*1000000000ULL + (rem*1000000000ULL)/qpc_freq;
+}
+
+static void platform_abort(void){
+  exit(1);
 }
 
 static B platform_net_init_once(void){
@@ -1471,8 +1560,8 @@ void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
 #elif L_OS_POSIX
 
 static void platform_arena_reserve_init(void){
-  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){exit(1);}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
-  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){exit(1);}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
+  AB[0]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[0]==MAP_FAILED){platform_abort();}AC[0]=ARENA_SZ/BUMP_UNIT_BYTES;AI[0]=1;
+  AB[1]=(Q*)mmap(0, ARENA_SZ, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);if(AB[1]==MAP_FAILED){platform_abort();}AC[1]=ARENA_SZ/BUDDY_UNIT_BYTES;AI[1]=0;
 }
 
 static void platform_commit_range(void* p, Q bytes){
@@ -1499,6 +1588,11 @@ static B platform_stdin_is_console(void){
   return isatty(fileno(stdin)) ? 1 : 0;
 }
 
+static void platform_write_stdout_bytes(const char* s, size_t n){
+  if(!s || !n) return;
+  (void)write(1, s, n);
+}
+
 static void platform_write_stderr_bytes(const char* s, size_t n){
   if(!s || !n) return;
   (void)write(2, s, n);
@@ -1508,6 +1602,10 @@ static Q platform_now_ns_u64(void){
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (Q)ts.tv_sec*1000000000ULL + (Q)ts.tv_nsec;
+}
+
+static void platform_abort(void){
+  exit(1);
 }
 
 static B platform_net_init_once(void){
@@ -1664,6 +1762,171 @@ void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
   return (addr == MAP_FAILED) ? 0 : addr;
 }
 
+#elif L_OS_WASM
+
+// WASM platform notes:
+// - No file I/O.
+// - No TCP sockets (browser JS host can be added later).
+// - Memory is linear wasm memory; we use a tiny bump allocator on top of it.
+
+#ifndef __wasm__
+  #define __wasm__ 1
+#endif
+
+extern unsigned char __heap_base;
+
+__attribute__((import_module("env"), import_name("l_wasm_write_stdout")))
+extern void l_wasm_write_stdout(const char* p, int n);
+
+__attribute__((import_module("env"), import_name("l_wasm_write_stderr")))
+extern void l_wasm_write_stderr(const char* p, int n);
+
+static B wasm_heap_inited = 0;
+static Q wasm_heap_used = 0;
+static unsigned char* wasm_heap_base = 0;
+
+static void wasm_heap_init(void){
+  if(wasm_heap_inited) return;
+  wasm_heap_base = &__heap_base;
+  wasm_heap_used = 0;
+  wasm_heap_inited = 1;
+}
+
+static void* wasm_heap_alloc_aligned16(Q bytes){
+  wasm_heap_init();
+  Q need = (bytes + 15ULL) & ~15ULL;
+  uintptr_t base = (uintptr_t)wasm_heap_base + (uintptr_t)wasm_heap_used;
+  uintptr_t end = base + (uintptr_t)need;
+  Q cur_pages = (Q)__builtin_wasm_memory_size(0);
+  Q cur_bytes = cur_pages * 65536ULL;
+  if((Q)end > cur_bytes){
+    Q extra = (Q)end - cur_bytes;
+    Q grow_pages = (extra + 65535ULL) / 65536ULL;
+    size_t prev = __builtin_wasm_memory_grow(0, (size_t)grow_pages);
+    if(prev == (size_t)-1) return 0;
+  }
+  wasm_heap_used += need;
+  return (void*)base;
+}
+
+static void platform_arena_reserve_init(void){
+  AB[0] = (Q*)wasm_heap_alloc_aligned16(ARENA_SZ);
+  if(!AB[0]) __builtin_trap();
+  AC[0] = ARENA_SZ / BUMP_UNIT_BYTES;
+  AI[0] = 1;
+  AB[1] = (Q*)wasm_heap_alloc_aligned16(ARENA_SZ);
+  if(!AB[1]) __builtin_trap();
+  AC[1] = ARENA_SZ / BUDDY_UNIT_BYTES;
+  AI[1] = 0;
+}
+
+static void platform_commit_range(void* p, Q bytes){
+  (void)p; (void)bytes;
+}
+
+static void* platform_vm_alloc(Q bytes){
+  return wasm_heap_alloc_aligned16(bytes);
+}
+
+static void platform_vm_free(void* base, Q bytes){
+  (void)base; (void)bytes;
+}
+
+static void platform_init_stdout_utf8_if_console(void){
+  // no-op
+}
+
+static B platform_stdin_is_console(void){
+  return 0;
+}
+
+static void platform_write_stdout_bytes(const char* s, size_t n){
+  if(!s || !n) return;
+  if(n > 0x7FFFFFFFULL) n = 0x7FFFFFFFULL;
+  l_wasm_write_stdout(s, (int)n);
+}
+
+static void platform_write_stderr_bytes(const char* s, size_t n){
+  if(!s || !n) return;
+  if(n > 0x7FFFFFFFULL) n = 0x7FFFFFFFULL;
+  l_wasm_write_stderr(s, (int)n);
+}
+
+static Q platform_now_ns_u64(void){
+  return 0;
+}
+
+static void platform_abort(void){
+  __builtin_trap();
+}
+
+static B platform_net_init_once(void){
+  return 0;
+}
+
+static B platform_tcp_listen_u16(W port, Q* out_listener){
+  (void)port;
+  if(out_listener) *out_listener = 0;
+  return 0;
+}
+
+static B platform_tcp_accept(Q listener, Q* out_conn){
+  (void)listener;
+  if(out_conn) *out_conn = 0;
+  return 0;
+}
+
+static B platform_tcp_connect_ipv4(W port, B ip0, B ip1, B ip2, B ip3, Q* out_conn){
+  (void)port; (void)ip0; (void)ip1; (void)ip2; (void)ip3;
+  if(out_conn) *out_conn = 0;
+  return 0;
+}
+
+static I platform_tcp_recv(Q conn, void* buf, D cap){
+  (void)conn; (void)buf; (void)cap;
+  return -1;
+}
+
+static I platform_tcp_send(Q conn, const void* buf, D len){
+  (void)conn; (void)buf; (void)len;
+  return -1;
+}
+
+static void platform_tcp_close(Q conn){
+  (void)conn;
+}
+
+void* os_map(char* fn, Q* sz, Q* h_out){
+  (void)fn;
+  if(sz) *sz = 0;
+  if(h_out) *h_out = 0;
+  return 0;
+}
+
+void* os_map_ro(char* fn, Q* sz, Q* h_out){
+  (void)fn;
+  if(sz) *sz = 0;
+  if(h_out) *h_out = 0;
+  return 0;
+}
+
+void os_unmap_ro(void* addr, Q sz, Q h){
+  (void)addr; (void)sz; (void)h;
+}
+
+void os_unmap(D fid){
+  (void)fid;
+}
+
+void os_truncate(Q h, Q sz){
+  (void)h; (void)sz;
+}
+
+void* os_remap(void* addr, Q old_cap, Q new_cap, Q h){
+  (void)addr; (void)old_cap; (void)new_cap; (void)h;
+  return 0;
+}
+
 #else
   #error "Unsupported platform (no platform layer implementation)"
 #endif
@@ -1789,6 +2052,10 @@ Q fl(B A, Q v, Q a, Q w){
 }
 
 Q sv(B A, Q v, Q a, Q w){
+#if L_OS_WASM
+  (void)A; (void)v; (void)a; (void)w;
+  return ae(2);
+#else
   if(t(a)!=6) return ae(2);
   char fn[256];
   if(!qstr_to_c(a, fn, (D)sizeof(fn))) return ae(2);
@@ -1815,6 +2082,7 @@ Q sv(B A, Q v, Q a, Q w){
   os_unmap(fid);
 
   return w;
+#endif
 }
 
 static Q text_read(Q w){
@@ -1873,6 +2141,64 @@ Q textm(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a;
   return text_read(w);
 }
+static Q texttry_read(Q w){
+#if L_OS_WASM
+  (void)w;
+  Q z = ln(2);
+  zid(z, 0, an(0));
+  zid(z, 1, vna(0, T_CHAR, 0, 0));
+  return z;
+#else
+  if(t(w)!=T_CHAR){
+    Q z = ln(2);
+    zid(z, 0, an(0));
+    zid(z, 1, vna(0, T_CHAR, 0, 0));
+    return z;
+  }
+  C fn[1024];
+  if(!qstr_to_c(w, fn, (D)sizeof(fn))){
+    Q z = ln(2);
+    zid(z, 0, an(0));
+    zid(z, 1, vna(0, T_CHAR, 0, 0));
+    return z;
+  }
+
+  Q sz = 0, h = 0;
+  void* addr = os_map_ro(fn, &sz, &h);
+  if(!addr){
+    Q z = ln(2);
+    zid(z, 0, an(0));
+    zid(z, 1, vna(0, T_CHAR, 0, 0));
+    return z;
+  }
+  if(addr==(void*)1){
+    Q z = ln(2);
+    zid(z, 0, an(1));
+    zid(z, 1, vna(0, T_CHAR, 0, 0));
+    return z;
+  }
+  if(sz > 0xFFFFFFFFULL){
+    os_unmap_ro(addr, sz, h);
+    Q z = ln(2);
+    zid(z, 0, an(0));
+    zid(z, 1, vna(0, T_CHAR, 0, 0));
+    return z;
+  }
+
+  Q body = vna(0, T_CHAR, 0, (D)sz);
+  if(sz) memcpy(p(body), addr, (size_t)sz);
+  os_unmap_ro(addr, sz, h);
+
+  Q z = ln(2);
+  zid(z, 0, an(1));
+  zid(z, 1, body);
+  return z;
+#endif
+}
+Q texttrym(B A, Q v, Q a, Q w){
+  (void)A; (void)v; (void)a;
+  return texttry_read(w);
+}
 Q textd(B A, Q v, Q a, Q w){
   (void)A; (void)v;
   return text_write(a, w);
@@ -1896,7 +2222,12 @@ Q textd(B A, Q v, Q a, Q w){
 // - port web body                   -> (blocks forever; serves fixed 200 OK)
 // - port webbg body                 -> server_handle (runs in background; REPL continues)
 // - webstop server_handle           -> missing
+// - port webapp handler             -> (blocks forever; handler(path)->(status;type;body) or (type;body))
+// - port webappbg handler           -> server_handle (Windows only; background thread queues requests to main thread REPL)
 // -----------------------------------------------------------------------------
+
+Q aply(B A, Q v, Q a, Q w);
+Q reprm(B A, Q v, Q a, Q w);
 
 static inline B net_qchar_src(Q w, const C** src_out, D* len_out, C* one_out){
   if(!src_out || !len_out || !one_out) return 0;
@@ -2143,6 +2474,338 @@ static Q v_web(B A, Q v, Q a, Q w){
   }
 }
 
+static D net_append_u32_dec(C* dst, D off, D cap, D x){
+  if(!dst || cap==0) return off;
+  if(off >= cap) return off;
+  C tmp[16];
+  D ti = 0;
+  Q v = (Q)x;
+  do{
+    Q q = v / 10ULL;
+    Q r = v - q*10ULL;
+    tmp[ti++] = (C)('0' + (C)r);
+    v = q;
+  }while(v && ti < (D)sizeof(tmp));
+  for(D i=ti-1;i<(D)ti;i--){
+    if(off >= cap) break;
+    dst[off++] = tmp[i];
+  }
+  return off;
+}
+
+static const char* net_status_text(D code){
+  switch(code){
+    case 200: return "OK";
+    case 404: return "Not Found";
+    case 500: return "Internal Server Error";
+    default: return "OK";
+  }
+}
+
+static inline B net_is_callable(Q q){
+  B tq = t(q);
+  return tq==T_LAMBDA || tq==2 || tq==4;
+}
+
+// ----------------------------------------------------------------------------
+// webapp request handling helper (main thread only)
+// ----------------------------------------------------------------------------
+static void net_webapp_serve_one(Q cs, Q handler, const C* path_s, D path_n){
+  if(!path_s || path_n<=0){ path_s = "/"; path_n = 1; }
+  Q ai0_before = AI[0];
+
+  Q pathq = vna(0, T_CHAR, 0, path_n);
+  memcpy(p(pathq), path_s, (size_t)path_n);
+
+  Q out = aply(0, 0, handler, pathq);
+
+  D status = 200;
+  const C* ctype_s = "text/plain";
+  D ctype_n = 10;
+  const C* body_s = "";
+  D body_n = 0;
+  Q body_tmp = 0;
+
+  if(is_err(out)){
+    status = 500;
+    Q rb = reprm(0, 0, 0, out);
+    if(ip(rb) && t(rb)==T_CHAR && sh(rb)==1){
+      body_tmp = rb;
+      body_s = (const C*)p(rb);
+      body_n = n(rb);
+    }else{
+      if(ip(rb)) dr(rb);
+      body_s = "handler error"; body_n = 13;
+    }
+  }else if(t(out)==T_CHAR){
+    C one = 0;
+    if(!net_qchar_src(out, &body_s, &body_n, &one)){ body_s=""; body_n=0; }
+  }else if(ip(out) && t(out)==0 && sh(out)==1){
+    D nn = n(out);
+    Q typeq = 0, bodyq = 0;
+    if(nn==2){
+      typeq = qi(out, 0);
+      bodyq = qi(out, 1);
+    }else if(nn==3){
+      Q sq = qi(out, 0);
+      if(t(sq)==T_INT && sh(sq)==0) status = (D)(ip(sq) ? pi(sq,0) : di_int(sq));
+      typeq = qi(out, 1);
+      bodyq = qi(out, 2);
+    }else{
+      status = 500;
+      body_s = "bad handler return"; body_n = 18;
+    }
+    C one0 = 0, one1 = 0;
+    if(typeq && t(typeq)==T_CHAR && net_qchar_src(typeq, &ctype_s, &ctype_n, &one0)){
+      // ok
+    }else if(nn==2 || nn==3){
+      status = 500;
+      ctype_s = "text/plain"; ctype_n = 10;
+      body_s = "bad content-type"; body_n = 16;
+    }
+    if(bodyq && t(bodyq)==T_CHAR && net_qchar_src(bodyq, &body_s, &body_n, &one1)){
+      // ok
+    }else if(nn==2 || nn==3){
+      status = 500;
+      ctype_s = "text/plain"; ctype_n = 10;
+      if(bodyq){
+        Q rb = reprm(0, 0, 0, bodyq);
+        if(ip(rb) && t(rb)==T_CHAR && sh(rb)==1){
+          body_tmp = rb;
+          body_s = (const C*)p(rb);
+          body_n = n(rb);
+        }else{
+          if(ip(rb)) dr(rb);
+          body_s = "bad body"; body_n = 8;
+        }
+      }else{
+        body_s = "bad body"; body_n = 8;
+      }
+    }
+  }else{
+    status = 500;
+    body_s = "bad handler return"; body_n = 18;
+  }
+
+  C hdr[512];
+  D h = 0;
+  const char* st = net_status_text(status);
+  const char* p0 = "HTTP/1.1 ";
+  const char* p1 = "\r\nContent-Type: ";
+  const char* p2 = "\r\nContent-Length: ";
+  const char* p3 = "\r\nConnection: close\r\n\r\n";
+  size_t lp0 = strlen(p0), lp1 = strlen(p1), lp2 = strlen(p2), lp3 = strlen(p3);
+  size_t lst = strlen(st);
+  if(lp0 + lp1 + lp2 + lp3 + lst + (size_t)ctype_n + 64 >= sizeof(hdr)){
+    platform_tcp_close(cs);
+  }else{
+    memcpy(hdr+h, p0, lp0); h += (D)lp0;
+    h = net_append_u32_dec(hdr, h, (D)sizeof(hdr), status);
+    hdr[h++] = ' ';
+    memcpy(hdr+h, st, lst); h += (D)lst;
+    memcpy(hdr+h, p1, lp1); h += (D)lp1;
+    if(ctype_n) memcpy(hdr+h, ctype_s, (size_t)ctype_n); h += ctype_n;
+    memcpy(hdr+h, p2, lp2); h += (D)lp2;
+    h = net_append_u32_dec(hdr, h, (D)sizeof(hdr), (D)body_n);
+    memcpy(hdr+h, p3, lp3); h += (D)lp3;
+
+    (void)net_send_all(cs, hdr, h);
+    if(body_n) (void)net_send_all(cs, body_s, body_n);
+    platform_tcp_close(cs);
+  }
+
+  if(body_tmp) dr(body_tmp);
+  dr(out);
+  dr(pathq);
+  AI[0] = ai0_before;
+}
+
+static Q v_webapp(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+  W port = 0;
+  if(!net_qint_to_u16(a, &port)) return ae(2);
+  if(!net_is_callable(w)) return ae(2);
+
+  Q ls = 0;
+  if(!platform_tcp_listen_u16(port, &ls)) return ae(2);
+
+  C reqbuf[8192];
+  for(;;){
+    Q cs = 0;
+    if(!platform_tcp_accept(ls, &cs)) continue;
+    I r = platform_tcp_recv(cs, reqbuf, (D)sizeof(reqbuf));
+    if(r <= 0){ platform_tcp_close(cs); continue; }
+    Q ai0_before = AI[0];
+
+    // Parse path from: "GET /path HTTP/1.1"
+    D nreq = (D)r;
+    D sp1 = -1, sp2 = -1;
+    for(D i=0;i<nreq;i++){ if(reqbuf[i] == ' '){ sp1 = i; break; } }
+    if(sp1 >= 0){
+      for(D i=sp1+1;i<nreq;i++){ if(reqbuf[i] == ' '){ sp2 = i; break; } }
+    }
+    const C* path_s = "/";
+    D path_n = 1;
+    if(sp1 >= 0 && sp2 > sp1+1){
+      path_s = reqbuf + sp1 + 1;
+      path_n = sp2 - (sp1 + 1);
+    }
+
+    net_webapp_serve_one(cs, w, path_s, path_n);
+  }
+}
+
+// ----------------------------------------------------------------------------
+// webappbg (Windows): accept/recv in a background thread; evaluate+respond in main thread.
+// ----------------------------------------------------------------------------
+#if L_OS_WIN32
+typedef struct {
+  Q cs;
+  D path_n;
+  C path[1024];
+} WebAppBgReq;
+
+typedef struct {
+  B running;
+  volatile B stop;
+  Q listener;
+  HANDLE thread;
+  Q handler;
+  HANDLE ev;
+  CRITICAL_SECTION mu;
+  D head, tail;
+  WebAppBgReq q[64];
+} WebAppBgState;
+
+static WebAppBgState WEBAPPBG = {0};
+
+static inline B webappbg_q_empty(WebAppBgState* st){ return st->head == st->tail; }
+static inline B webappbg_q_full(WebAppBgState* st){ return ((st->tail + 1) & 63) == (st->head & 63); }
+
+static void webappbg_signal(WebAppBgState* st){
+  if(st && st->ev) SetEvent(st->ev);
+}
+static void webappbg_maybe_reset(WebAppBgState* st){
+  if(!st || !st->ev) return;
+  if(webappbg_q_empty(st)) ResetEvent(st->ev);
+}
+
+static DWORD WINAPI webappbg_thread_main(LPVOID param){
+  WebAppBgState* st = (WebAppBgState*)param;
+  C reqbuf[8192];
+  for(;;){
+    if(st->stop) break;
+    Q cs = 0;
+    if(!platform_tcp_accept(st->listener, &cs)){
+      if(st->stop) break;
+      continue;
+    }
+    I r = platform_tcp_recv(cs, reqbuf, (D)sizeof(reqbuf));
+    if(r <= 0){ platform_tcp_close(cs); continue; }
+
+    // Parse path from: "GET /path HTTP/1.1"
+    D nreq = (D)r;
+    D sp1 = -1, sp2 = -1;
+    for(D i=0;i<nreq;i++){ if(reqbuf[i] == ' '){ sp1 = i; break; } }
+    if(sp1 >= 0){
+      for(D i=sp1+1;i<nreq;i++){ if(reqbuf[i] == ' '){ sp2 = i; break; } }
+    }
+    const C* path_s = "/";
+    D path_n = 1;
+    if(sp1 >= 0 && sp2 > sp1+1){
+      path_s = reqbuf + sp1 + 1;
+      path_n = sp2 - (sp1 + 1);
+      if(path_n <= 0){ path_s = "/"; path_n = 1; }
+    }
+
+    EnterCriticalSection(&st->mu);
+    if(webappbg_q_full(st)){
+      LeaveCriticalSection(&st->mu);
+      platform_tcp_close(cs);
+      continue;
+    }
+    D idx = st->tail & 63;
+    st->q[idx].cs = cs;
+    if(path_n > (D)sizeof(st->q[idx].path)) path_n = (D)sizeof(st->q[idx].path);
+    st->q[idx].path_n = path_n;
+    memcpy(st->q[idx].path, path_s, (size_t)path_n);
+    st->tail++;
+    webappbg_signal(st);
+    LeaveCriticalSection(&st->mu);
+  }
+  return 0;
+}
+
+static B webappbg_pop(WebAppBgState* st, WebAppBgReq* out){
+  if(!st || !out) return 0;
+  B ok = 0;
+  EnterCriticalSection(&st->mu);
+  if(!webappbg_q_empty(st)){
+    D idx = st->head & 63;
+    *out = st->q[idx];
+    st->head++;
+    webappbg_maybe_reset(st);
+    ok = 1;
+  }else{
+    webappbg_maybe_reset(st);
+  }
+  LeaveCriticalSection(&st->mu);
+  return ok;
+}
+#endif
+
+static Q v_webappbg(B A, Q v, Q a, Q w){
+  (void)A; (void)v;
+#if !L_OS_WIN32
+  (void)a; (void)w;
+  return ae(2);
+#else
+  // Allow hot-swapping the handler while the background server is running.
+  // This is useful during REPL-driven development (edit handler; re-run `webappbg`).
+  // The server itself is single-threaded from the Lang runtime's point of view:
+  // only the accept/recv happens on the background thread; evaluation+respond is on the main thread.
+  if(WEBAPPBG.running){
+    if(!net_is_callable(w)) return ae(2);
+    if(WEBAPPBG.handler) dr(WEBAPPBG.handler);
+    WEBAPPBG.handler = t2g(w); ir(WEBAPPBG.handler);
+    return an((J)WEBAPPBG.listener);
+  }
+  W port = 0;
+  if(!net_qint_to_u16(a, &port)) return ae(2);
+  if(!net_is_callable(w)) return ae(2);
+
+  Q ls = 0;
+  if(!platform_tcp_listen_u16(port, &ls)) return ae(2);
+
+  WEBAPPBG.listener = ls;
+  WEBAPPBG.handler = t2g(w); ir(WEBAPPBG.handler);
+  WEBAPPBG.stop = 0;
+  WEBAPPBG.head = 0;
+  WEBAPPBG.tail = 0;
+  if(!WEBAPPBG.ev){
+    WEBAPPBG.ev = CreateEventA(0, TRUE, FALSE, 0);
+    if(!WEBAPPBG.ev){ platform_tcp_close(ls); dr(WEBAPPBG.handler); WEBAPPBG.handler = 0; WEBAPPBG.listener = 0; return ae(2); }
+  }else{
+    ResetEvent(WEBAPPBG.ev);
+  }
+  InitializeCriticalSection(&WEBAPPBG.mu);
+
+  WEBAPPBG.thread = CreateThread(0, 0, webappbg_thread_main, &WEBAPPBG, 0, 0);
+  if(!WEBAPPBG.thread){
+    WEBAPPBG.stop = 1;
+    platform_tcp_close(ls);
+    dr(WEBAPPBG.handler); WEBAPPBG.handler = 0;
+    WEBAPPBG.listener = 0;
+    DeleteCriticalSection(&WEBAPPBG.mu);
+    ResetEvent(WEBAPPBG.ev);
+    return ae(2);
+  }
+
+  WEBAPPBG.running = 1;
+  return an((J)ls);
+#endif
+}
+
 static Q v_webbg(B A, Q v, Q a, Q w){
   (void)A; (void)v;
 #if !L_OS_WIN32
@@ -2224,25 +2887,63 @@ static Q v_webstop(B A, Q v, Q a, Q w){
 #else
   Q h = 0;
   if(!net_qint_to_handle(w, &h)) return ae(2);
-  (void)h;
-  if(!WEBBG.running) return mis();
 
-  WEBBG.stop = 1;
-  if(WEBBG.listener) platform_tcp_close(WEBBG.listener);
-  if(WEBBG.thread){
-    WaitForSingleObject(WEBBG.thread, INFINITE);
-    CloseHandle(WEBBG.thread);
+  B stopped = 0;
+  if(WEBBG.running && h == WEBBG.listener){
+    WEBBG.stop = 1;
+    if(WEBBG.listener) platform_tcp_close(WEBBG.listener);
+    if(WEBBG.thread){
+      WaitForSingleObject(WEBBG.thread, INFINITE);
+      CloseHandle(WEBBG.thread);
+    }
+    WEBBG.thread = 0;
+    WEBBG.listener = 0;
+    WEBBG.running = 0;
+
+    if(WEBBG.body) os_heap_free(WEBBG.body);
+    WEBBG.body = 0;
+    WEBBG.body_len = 0;
+    WEBBG.hdr_len = 0;
+    stopped = 1;
   }
-  WEBBG.thread = 0;
-  WEBBG.listener = 0;
-  WEBBG.running = 0;
 
-  if(WEBBG.body) os_heap_free(WEBBG.body);
-  WEBBG.body = 0;
-  WEBBG.body_len = 0;
-  WEBBG.hdr_len = 0;
+#if L_OS_WIN32
+  if(WEBAPPBG.running && h == WEBAPPBG.listener){
+    WEBAPPBG.stop = 1;
+    if(WEBAPPBG.listener) platform_tcp_close(WEBAPPBG.listener);
+    if(WEBAPPBG.thread){
+      WaitForSingleObject(WEBAPPBG.thread, INFINITE);
+      CloseHandle(WEBAPPBG.thread);
+    }
+    WEBAPPBG.thread = 0;
+    WEBAPPBG.listener = 0;
+    WEBAPPBG.running = 0;
 
-  return mis();
+    if(WEBAPPBG.handler) dr(WEBAPPBG.handler);
+    WEBAPPBG.handler = 0;
+
+    // Close any queued (unserved) connections.
+    EnterCriticalSection(&WEBAPPBG.mu);
+    while(WEBAPPBG.head != WEBAPPBG.tail){
+      D idx = WEBAPPBG.head & 63;
+      if(WEBAPPBG.q[idx].cs) platform_tcp_close(WEBAPPBG.q[idx].cs);
+      WEBAPPBG.q[idx].cs = 0;
+      WEBAPPBG.q[idx].path_n = 0;
+      WEBAPPBG.head++;
+    }
+    WEBAPPBG.head = 0;
+    WEBAPPBG.tail = 0;
+    LeaveCriticalSection(&WEBAPPBG.mu);
+
+    DeleteCriticalSection(&WEBAPPBG.mu);
+    WEBAPPBG.head = 0;
+    WEBAPPBG.tail = 0;
+    if(WEBAPPBG.ev) ResetEvent(WEBAPPBG.ev);
+    stopped = 1;
+  }
+#endif
+
+  return stopped ? mis() : mis();
 #endif
 }
 
@@ -2338,7 +3039,7 @@ Q file_read_log(Q f){
   return result_list;
 }
 
-#define VTZ 49
+#define VTZ 52
 #define ATZ 14
 C* VT[];C* AT[];
 C* MAP="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -2350,7 +3051,7 @@ typedef struct {
 
 static void stdoutbuf_flush(StdoutBuf* b){
   if(!b || !b->len) return;
-  fwrite(b->buf, 1, b->len, stdout);
+  platform_write_stdout_bytes(b->buf, b->len);
   b->len = 0;
 }
 
@@ -2477,6 +3178,17 @@ static void out_pr_tag64_payload(L_Out* out, Q payload){
 }
 
 static inline void out_pr_f64(L_Out* out, double x){
+#if L_OS_WASM
+  // No libc float formatting in the freestanding WASM build (yet).
+  // Print float payload bits in hex so values remain inspectable.
+  Q bits = f64_bits(x);
+  out_puts(out, "0x");
+  for(int i=15;i>=0;--i){
+    D nyb = (D)((bits >> (i*4)) & 0xFULL);
+    out_putc(out, (C)(nyb < 10 ? ('0' + nyb) : ('a' + (nyb - 10))));
+  }
+  out_puts(out, "f");
+#else
   if(isnan(x)){ out_puts(out, "nan"); return; }
   if(isinf(x)){ if(x<0) out_putc(out, '-'); out_puts(out, "inf"); return; }
   C buf[80];
@@ -2490,6 +3202,7 @@ static inline void out_pr_f64(L_Out* out, double x){
   }else{
     out_write(out, buf, (size_t)n);
   }
+#endif
 }
 
 static inline void out_pr_adv_ascii(L_Out* out, D ai){
@@ -4124,8 +4837,8 @@ Q ticks(B A, Q v, Q a, Q w);
 Q ev(B A, Q v, Q a, Q w);
 Q bench(B A, Q v, Q a, Q w);
 Q aply(B A, Q v, Q a, Q w);
-VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd,0,0,  0,0,v_tcprecv,v_tcpsend,0,v_tcpconnect,v_web,v_webbg,0};
-VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm,reprm,prm,  v_tcplisten,v_tcpaccept,0,0,v_tcpclose,0,0,0,v_webstop};
+VF VD[VTZ]={0,mt,0,at,0,pl,ml,0,ca,mn,mx,eq,lt,gt,xr,nd,or,0,sb,sv,0,0,0,lg,0,dvv,md,idv,0,0,0,0,0,aply,0,0,0,textd,0,0,  0,0,v_tcprecv,v_tcpsend,0,v_tcpconnect,v_web,v_webbg,0,v_webapp,v_webappbg,0};
+VF VM[VTZ]={0,nt,tl,tp,ct,0,car,id,en,0,0,0,0,0,0,0,0,bn,ng,0,ld,fl,0,0,rl,0,0,0,mxcsr,setmxcsr,ticks,bench,ev,0,arena,lex,lex2,textm,reprm,prm,  v_tcplisten,v_tcpaccept,0,0,v_tcpclose,0,0,0,v_webstop,0,0,texttrym};
 
 static const BM VBM[VTZ]={
   /*  0 */ NB,
@@ -4177,6 +4890,9 @@ static const BM VBM[VTZ]={
   /* 46 */ NB, // web
   /* 47 */ NB, // webbg
   /* 48 */ NB, // webstop
+  /* 49 */ NB, // webapp
+  /* 50 */ NB, // webappbg
+  /* 51 */ NB, // texttry
 };
 
 static const BM VBD[VTZ]={
@@ -4229,8 +4945,11 @@ static const BM VBD[VTZ]={
   /* 46 */ NB, // web
   /* 47 */ NB, // webbg
   /* 48 */ NB, // webstop
+  /* 49 */ NB, // webapp
+  /* 50 */ NB, // webappbg
+  /* 51 */ NB, // texttry
 };
-C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text","repr","pr","tcplisten","tcpaccept","tcprecv","tcpsend","tcpclose","tcpconnect","web","webbg","webstop"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
+C* VT[VTZ]={" ","~","!","@","#","+","*",":",",","&","|","=","<",">","^","and","or","bnot","-","save","load","file","root","log","readlog","/","%","div","mxcsr","setmxcsr","ticks","bench","eval","apply","arena","lex","lex2","text","repr","pr","tcplisten","tcpaccept","tcprecv","tcpsend","tcpclose","tcpconnect","web","webbg","webstop","webapp","webappbg","texttry"}; // LATER: (grow width:sign/zero extend sx sx) (shift sl sar sr) WAY LATER: Expose comparison flags directly instead of hiding them. 
 
 VF AV[ATZ]={0  ,ed ,sc ,ov ,el ,er ,lvs,lfa,0  ,0  ,lvl,lsl,itr,its};
 C* AT[ATZ]={" ","'","→","←","↰","↱","↓","↑","↺","↻","↿","⇃","↫","↬"};
@@ -4289,9 +5008,20 @@ Q ticks(B A, Q v, Q a, Q w){
 
 Q arena(B A, Q v, Q a, Q w){
   (void)A; (void)v; (void)a; (void)w;
+#if L_OS_WASM
+  Q z = ln(6);
+  zid(z, 0, an((J)(uintptr_t)AB[0]));
+  zid(z, 1, an((J)AC[0]));
+  zid(z, 2, an((J)AI[0]));
+  zid(z, 3, an((J)(uintptr_t)AB[1]));
+  zid(z, 4, an((J)AC[1]));
+  zid(z, 5, an((J)AI[1]));
+  return z;
+#else
   printf("AB[0] AC[0] AI[0] %lld %lld %lld\n", (long long)AB[0], (long long)AC[0], (long long)AI[0]);
   printf("AB[1] AC[1] AI[1] %lld %lld %lld\n", (long long)AB[1], (long long)AC[1], (long long)AI[1]);
   return mis(); // missing (print-only)
+#endif
 }
 
 
@@ -5167,6 +5897,32 @@ static inline J parse_i10(const C* s, D len){
   return (J)r * sign;
 }
 static inline double parse_f10(const C* s, D len){
+#if L_OS_WASM
+  // Minimal float parser for freestanding WASM:
+  // supports: [-]?[0-9]+(.[0-9]+)?
+  // (no exponent, no inf/nan tokens)
+  if(!s || len<=0) return 0.0;
+  D i = 0;
+  double sign = 1.0;
+  if(s[i]=='-'){ sign = -1.0; i++; }
+  double x = 0.0;
+  for(; i<len; i++){
+    C c = s[i];
+    if(c<'0' || c>'9') break;
+    x = x*10.0 + (double)(c - '0');
+  }
+  if(i<len && s[i]=='.'){
+    i++;
+    double place = 0.1;
+    for(; i<len; i++){
+      C c = s[i];
+      if(c<'0' || c>'9') break;
+      x += (double)(c - '0') * place;
+      place *= 0.1;
+    }
+  }
+  return x * sign;
+#else
   C tmp_small[128];
   C* tmp = tmp_small;
   if(len >= (D)sizeof(tmp_small)){
@@ -5182,6 +5938,7 @@ static inline double parse_f10(const C* s, D len){
   // The lexer guarantees a numeric-ish token, but keep this strict anyway.
   if(errno || !endp || *endp) return 0.0;
   return x;
+#endif
 }
 static inline Q af(Q ar, double x){
   Q q = tsna(ar, T_FLT, 0, 3, 1, 1);
@@ -5262,6 +6019,7 @@ static inline D ascii_adv_id(const C* p){
   return 0;
 }
 
+#if !L_OS_WASM
 static void print_usage(void){
   printf("usage: l [--dbg-startup] [--dump-tokens] [--no-inplace] [script.l]\n");
 }
@@ -5281,12 +6039,54 @@ static void parse_args(I argc, C** argv, const C** script_out, B* usage_out){
     if(usage_out) *usage_out = 1;
   }
 }
+#endif
 
 static inline void dbg_write_startup(const char* s){
   if(!L_opts.dbg_startup || !s) return;
   platform_write_stderr_bytes(s, strlen(s));
 }
+
+static B LANG_INITED = 0;
+static void lang_runtime_init_once(void){
+  if(LANG_INITED) return;
+  platform_init_stdout_utf8_if_console();
+  platform_arena_reserve_init();
+  buddyinit(1);
+
+  FT_addr = vca(1, 3, 3, 4096);
+  FT_sz   = vca(1, 3, 3, 4096);
+  FT_cap  = vca(1, 3, 3, 4096);
+  FT_h    = vca(1, 3, 3, 4096);
+  FT_fn   = vca(1, 0, 3, 4096);
+  G = dni(0,3,0,1); // global dictionary in buddy allocator
+  sym_init();
+  Q ft = dni(0,3,0,1); // file table dict in buddy allocator
+  dkv(ft, sym_intern_bytes("addr", 4), FT_addr);
+  dkv(ft, sym_intern_bytes("sz",   2), FT_sz);
+  dkv(ft, sym_intern_bytes("cap",  3), FT_cap);
+  dkv(ft, sym_intern_bytes("h",    1), FT_h);
+  dkv(ft, sym_intern_bytes("fn",   2), FT_fn);
+  dkv(G,  sym_intern_bytes("FT",   2), ft);
+  SC[0] = dni(0,3,0,0);
+  SP = 0;
+
+  LANG_INITED = 1;
+}
+
+static void commit_locals_to_globals_if_at_top(void){
+  if(0==SP && 0==LP){
+    for(D i=0;i<n(pi(SC[0],1));i++){
+      Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
+      dkv(G,t2g(gk),t2g(gv));
+    }
+    AI[0]=1;SC[0]=dni(0,3,0,0); SP=0;
+  } // reset THI only if evaluation takes us back to the global scope.
+}
+
 static void dump_token_tape(Q* toks){
+#if L_OS_WASM
+  (void)toks;
+#else
   if(!toks) return;
   for(D i=0; toks[i]; ++i){
     Q x = toks[i];
@@ -5294,9 +6094,14 @@ static void dump_token_tape(Q* toks){
     pr(x);
     printf("\n");
   }
+#endif
 }
 static inline B dump_tokens_enabled(void){
+#if L_OS_WASM
+  return 0;
+#else
   return L_opts.dump_tokens;
+#endif
 }
 
 static Q eval_lexed_tokens(Q* tokens_base){
@@ -5538,6 +6343,14 @@ Q* lx_len(const C* b, D l){
       if(st!=5 && (c=='\n' || c=='\r' || c=='\t' || c==';')) c=0; // token boundary at separators (except strings)
       cc=cl(c);
       D next_st=TT[st][cc];
+      // Allow escaped quotes inside string literals: \" does not end the string.
+      // A quote is escaped if preceded by an odd number of consecutive backslashes.
+      if(st==5 && c=='\"' && next_st==7){
+        D bs = 0;
+        const C* qbs = p - 1;
+        while(qbs > s && *qbs=='\\'){ bs++; qbs--; }
+        if(bs&1) next_st = 5;
+      }
       // Disambiguate dyadic '-' written with spaces ("1 - 2") from a negative element in a numeric vector ("1 -2 3").
       // If we're in a numeric vector and see '-' followed by whitespace/separator, end the current numeric token before '-'
       // so the outer loop can re-lex '-' as a verb.
@@ -5623,14 +6436,45 @@ lx_name_done:;
             }
           }
           if(tok!=tmp_small) os_heap_free(tok);
-        }
-        else if(st==6){ q[qi++]=sym_intern_bytes(s+1, len-1); }
-        else if(st==5){ s++; len--; Q z=vna(0,6,0,len); for(D i=0;i<len;i++)pid(z,i,s[i]); q[qi++]=z; if(p<end)p++;}
-        // TODO: S_FLT
-        st=0;break;
-      }
-      st=next_st;
-    }
+         }
+         else if(st==6){ q[qi++]=sym_intern_bytes(s+1, len-1); }
+         else if(st==5){
+           s++; len--; // strip opening quote; closing quote is consumed below
+           // Only unescape \\ and \" so Windows paths like "C:\tmp" remain intact.
+           // Unknown escapes preserve the backslash.
+           D has_bs = 0;
+           for(D i=0;i<len;i++){ if(s[i]=='\\'){ has_bs = 1; break; } }
+           if(!has_bs){
+             Q z=vna(0,6,0,len);
+             for(D i=0;i<len;i++) pid(z,i,s[i]);
+             q[qi++]=z;
+           }else{
+             D out_len = 0;
+             for(D i=0;i<len;i++){
+               if(s[i]=='\\' && (i+1)<len){
+                 C e = s[i+1];
+                 if(e=='\\' || e=='\"'){ out_len++; i++; continue; }
+               }
+               out_len++;
+             }
+             Q z=vna(0,6,0,out_len);
+             D o=0;
+             for(D i=0;i<len;i++){
+               if(s[i]=='\\' && (i+1)<len){
+                 C e = s[i+1];
+                 if(e=='\\' || e=='\"'){ pid(z,o++,e); i++; continue; }
+               }
+               pid(z,o++,s[i]);
+             }
+             q[qi++]=z;
+           }
+           if(p<end)p++;
+         }
+         // TODO: S_FLT
+         st=0;break;
+       }
+       st=next_st;
+     }
   }
   q[qi]=0;return q;
 }
@@ -5640,6 +6484,8 @@ lx_name_done:;
 Q* lx2_len(const C* b, D l){
   return lx_len(b, l);
 }
+
+#if !L_OS_WASM
 static C* read_line(FILE* in){
   if(!in) return 0;
   size_t cap = 256;
@@ -5679,6 +6525,7 @@ static B repl_buf_in_open_string(const C* buf, size_t len){
       }
       if(c=='\"'){ in_str = 1; continue; }
     }else{
+      if(c=='\\' && (i+1)<len){ i++; continue; } // skip escaped char (e.g. \")
       if(c=='\"'){ in_str = 0; continue; }
     }
   }
@@ -5715,35 +6562,135 @@ static C* read_repl_stmt(FILE* in, B* exit_repl){
 
   return buf;
 }
+#endif
 
+#if L_OS_WIN32 && !L_OS_WASM
+typedef struct {
+  volatile B stop;
+  HANDLE ev;
+  HANDLE thread;
+  CRITICAL_SECTION mu;
+  D head, tail;
+  C* line[64];
+  B exit[64];
+} ReplInState;
+
+static ReplInState REPLIN = {0};
+
+static inline B replin_q_empty(ReplInState* st){ return st->head == st->tail; }
+static inline B replin_q_full(ReplInState* st){ return ((st->tail + 1) & 63) == (st->head & 63); }
+
+static void replin_signal(ReplInState* st){
+  if(st && st->ev) SetEvent(st->ev);
+}
+static void replin_maybe_reset(ReplInState* st){
+  if(!st || !st->ev) return;
+  if(replin_q_empty(st)) ResetEvent(st->ev);
+}
+
+static DWORD WINAPI replin_thread_main(LPVOID param){
+  ReplInState* st = (ReplInState*)param;
+  for(;;){
+    if(st->stop) break;
+    printf(" ");
+    B exit_repl = 0;
+    C* line = read_repl_stmt(stdin, &exit_repl);
+    if(!line) break;
+
+    EnterCriticalSection(&st->mu);
+    if(replin_q_full(st)){
+      LeaveCriticalSection(&st->mu);
+      os_heap_free(line);
+      if(exit_repl) break;
+      continue;
+    }
+    D idx = st->tail & 63;
+    st->line[idx] = line;
+    st->exit[idx] = exit_repl;
+    st->tail++;
+    replin_signal(st);
+    LeaveCriticalSection(&st->mu);
+
+    if(exit_repl) break;
+  }
+  st->stop = 1;
+  replin_signal(st);
+  return 0;
+}
+
+static B replin_start(ReplInState* st){
+  if(!st) return 0;
+  st->stop = 0;
+  st->head = 0;
+  st->tail = 0;
+  if(!st->ev){
+    st->ev = CreateEventA(0, TRUE, FALSE, 0);
+    if(!st->ev) return 0;
+  }else{
+    ResetEvent(st->ev);
+  }
+  InitializeCriticalSection(&st->mu);
+  st->thread = CreateThread(0, 0, replin_thread_main, st, 0, 0);
+  if(!st->thread){
+    DeleteCriticalSection(&st->mu);
+    ResetEvent(st->ev);
+    return 0;
+  }
+  return 1;
+}
+
+static void replin_stop(ReplInState* st){
+  if(!st) return;
+  st->stop = 1;
+  replin_signal(st);
+  if(st->thread){
+    WaitForSingleObject(st->thread, INFINITE);
+    CloseHandle(st->thread);
+  }
+  st->thread = 0;
+  EnterCriticalSection(&st->mu);
+  while(!replin_q_empty(st)){
+    D idx = st->head & 63;
+    if(st->line[idx]) os_heap_free(st->line[idx]);
+    st->line[idx] = 0;
+    st->head++;
+  }
+  replin_maybe_reset(st);
+  LeaveCriticalSection(&st->mu);
+  DeleteCriticalSection(&st->mu);
+}
+
+static B replin_pop(ReplInState* st, C** line_out, B* exit_out){
+  if(line_out) *line_out = 0;
+  if(exit_out) *exit_out = 0;
+  if(!st) return 0;
+  B ok = 0;
+  EnterCriticalSection(&st->mu);
+  if(!replin_q_empty(st)){
+    D idx = st->head & 63;
+    if(line_out) *line_out = st->line[idx];
+    if(exit_out) *exit_out = st->exit[idx];
+    st->line[idx] = 0;
+    st->exit[idx] = 0;
+    st->head++;
+    replin_maybe_reset(st);
+    ok = 1;
+  }else{
+    replin_maybe_reset(st);
+  }
+  LeaveCriticalSection(&st->mu);
+  return ok;
+}
+#endif
+
+#if !L_OS_WASM
 I main(I argc, C** argv){
   const C* script = 0;
   B usage = 0;
   parse_args(argc, argv, &script, &usage);
   if(usage) print_usage();
   dbg_write_startup("dbg: main start\n");
-  platform_init_stdout_utf8_if_console();
-  platform_arena_reserve_init();
-  dbg_write_startup("dbg: arenas reserved\n");
-  buddyinit(1);
-  dbg_write_startup("dbg: buddyinit done\n");
-  FT_addr = vca(1, 3, 3, 4096);
-  FT_sz   = vca(1, 3, 3, 4096);
-  FT_cap  = vca(1, 3, 3, 4096);
-  FT_h    = vca(1, 3, 3, 4096);
-  FT_fn   = vca(1, 0, 3, 4096);
-  G=dni(0,3,0,1); // global dictionary in buddy allocator
-  sym_init();
-  dbg_write_startup("dbg: sym_init done\n");
-  Q ft = dni(0,3,0,1); // file table dict in buddy allocator
-  dkv(ft, sym_intern_bytes("addr", 4), FT_addr);
-  dkv(ft, sym_intern_bytes("sz",   2), FT_sz);
-  dkv(ft, sym_intern_bytes("cap",  3), FT_cap);
-  dkv(ft, sym_intern_bytes("h",    1), FT_h);
-  dkv(ft, sym_intern_bytes("fn",   2), FT_fn);
-  dkv(G,  sym_intern_bytes("FT",   2), ft);
-  SC[0]=dni(0,3,0,0); SP=0;
-  dbg_write_startup("dbg: globals ready\n");
+  lang_runtime_init_once();
 
   // In non-interactive/scripted usage (e.g. tests), stdin may not be a real console.
   // Avoid entering the REPL in that case to prevent stdio/handle edge-case crashes.
@@ -5757,10 +6704,59 @@ I main(I argc, C** argv){
       Q r = eval_code_file(script);
       dbg_write_startup("dbg: eval_code_file done\n");
       pr(r);printf("\n");
+      commit_locals_to_globals_if_at_top();
     }
     if(!stdin_is_console) return 0;
   }
 
+#if L_OS_WIN32
+  if(!replin_start(&REPLIN)) return 0;
+  for(;;){
+    HANDLE hs[2];
+    DWORD nh = 0;
+    hs[nh++] = REPLIN.ev;
+    if(WEBAPPBG.running && WEBAPPBG.ev) hs[nh++] = WEBAPPBG.ev;
+    DWORD wr = WaitForMultipleObjects(nh, hs, FALSE, INFINITE);
+
+    if(wr == WAIT_OBJECT_0){
+      for(;;){
+        C* line = 0;
+        B exit_repl = 0;
+        if(!replin_pop(&REPLIN, &line, &exit_repl)) break;
+        if(!line) continue;
+        if(exit_repl){ os_heap_free(line); goto repl_done; }
+        if(!*line){ os_heap_free(line); continue; }
+        if(0==SP && 0==LP){
+          for(D i=0;i<n(pi(SC[0],1));i++){
+            Q gk=pi(pi(SC[0],1),i);Q gv=pi(pi(SC[0],2),i);
+            dkv(G,t2g(gk),t2g(gv));
+          }
+          AI[0]=1;SC[0]=dni(0,3,0,0); SP=0; 
+        } // reset THI only if evaluation takes us back to the global scope.
+        Q* tokens_base = lx_len(line, (D)strlen(line));
+        if(!tokens_base){ os_heap_free(line); pr(ae(2)); printf("\n"); continue; }
+        Q r = eval_lexed_tokens(tokens_base);
+        os_heap_free(tokens_base);
+        pr(r);printf("\n");
+        commit_locals_to_globals_if_at_top();
+        os_heap_free(line);
+      }
+      continue;
+    }
+
+    if(nh==2 && wr == WAIT_OBJECT_0 + 1){
+      WebAppBgReq req;
+      while(webappbg_pop(&WEBAPPBG, &req)){
+        if(WEBAPPBG.handler) net_webapp_serve_one(req.cs, WEBAPPBG.handler, req.path, req.path_n);
+        else platform_tcp_close(req.cs);
+      }
+      continue;
+    }
+  }
+repl_done:
+  replin_stop(&REPLIN);
+  return 0;
+#else
   while (1) {
     printf(" ");
     B exit_repl = 0;
@@ -5780,7 +6776,45 @@ I main(I argc, C** argv){
     Q r = eval_lexed_tokens(tokens_base);
     os_heap_free(tokens_base);
     pr(r);printf("\n");
+    commit_locals_to_globals_if_at_top();
     os_heap_free(line);
   }
   return 0;
+#endif
 }
+#endif
+
+#if L_OS_WASM
+static D LANG_WASM_LAST_LEN = 0;
+static Q LANG_WASM_LAST_QSTR = 0;
+
+void lang_init(void){
+  lang_runtime_init_once();
+}
+
+D lang_last_len(void){
+  return LANG_WASM_LAST_LEN;
+}
+
+D lang_alloc(D bytes){
+  if(bytes == 0) return 0;
+  void* p = platform_vm_alloc((Q)bytes);
+  return (D)(uintptr_t)p;
+}
+
+D lang_eval(D src_ptr, D src_len){
+  lang_runtime_init_once();
+  if(!src_ptr || src_len == 0){
+    LANG_WASM_LAST_LEN = 0;
+    LANG_WASM_LAST_QSTR = 0;
+    return 0;
+  }
+  if(src_len > 0x7FFFFFFF) src_len = 0x7FFFFFFF;
+  const C* src = (const C*)(uintptr_t)src_ptr;
+  Q r = eval_code_tape(src, (D)src_len);
+  Q s = reprm(0, 0, 0, r);
+  LANG_WASM_LAST_QSTR = s;
+  LANG_WASM_LAST_LEN = n(s);
+  return (D)(uintptr_t)p(s);
+}
+#endif
